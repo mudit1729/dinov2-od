@@ -7,6 +7,12 @@ num_epochs = 50
 batch_size = 8  # Batch size per GPU
 num_workers = 4  # Number of data loading workers per GPU
 
+# Debug/Overfit settings
+debug_mode = False       # Enable debug/overfit mode with a small subset of data
+debug_dataset_size = 32  # Number of samples for overfitting in debug mode
+debug_epochs = 100       # Number of epochs when in debug mode (usually higher for overfitting)
+debug_learning_rate = 5e-4  # Often higher learning rate for overfitting
+
 # Distributed training parameters
 distributed_backend = "nccl"  # Backend for distributed training (nccl for GPU, gloo for CPU)
 find_unused_parameters = True  # For DDP, find unused parameters in the model

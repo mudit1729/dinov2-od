@@ -24,7 +24,8 @@ from dino_detector.config import (
     distributed_backend, find_unused_parameters, gradient_accumulation_steps,
     gradient_clip_val,
     set_cost_class, set_cost_bbox, set_cost_giou, focal_alpha, focal_gamma,
-    loss_weights, num_classes
+    loss_weights, num_classes,
+    debug_mode, debug_dataset_size, debug_epochs, debug_learning_rate
 )
 from torchvision import transforms
 import matplotlib.pyplot as plt
@@ -38,6 +39,31 @@ COCO_URLS = {
 }
 
 # Create losses and matcher
+def create_debug_subset(dataset, num_samples):
+    """
+    Create a small subset of the dataset for debugging/overfitting.
+    
+    Args:
+        dataset: The original dataset
+        num_samples: Number of samples to include in the subset
+        
+    Returns:
+        A subset of the original dataset
+    """
+    # Get a small subset of the dataset for overfitting
+    from torch.utils.data import Subset
+    import random
+    
+    # Make sure we don't try to get more samples than exist in the dataset
+    num_samples = min(num_samples, len(dataset))
+    
+    # Choose random indices without replacement
+    random.seed(42)  # For reproducibility
+    indices = random.sample(range(len(dataset)), num_samples)
+    
+    # Create and return a subset with those indices
+    return Subset(dataset, indices)
+
 def create_criterion(args):
     """
     Create and return the criterion and matcher for object detection.
@@ -462,6 +488,12 @@ def main_worker(rank, world_size, args):
     print(f"Process {rank}: Loading training dataset from {args.train_images}")
     train_dataset = COCODataset(args.train_images, args.train_annotations, transform=transform)
     
+    # Create a small subset for debug/overfit mode if requested
+    if args.debug:
+        original_size = len(train_dataset)
+        train_dataset = create_debug_subset(train_dataset, args.debug_samples)
+        print(f"Process {rank}: DEBUG MODE - Using {len(train_dataset)} training samples out of {original_size}")
+    
     # Use DistributedSampler for distributed training
     if args.distributed:
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -490,6 +522,13 @@ def main_worker(rank, world_size, args):
         val_dataset = COCODataset(args.val_images, args.val_annotations, transform=transform)
         val_dataset.coco_path = args.val_annotations  # Store annotation path for evaluation
         
+        # In debug mode, use the same small subset for validation
+        # This helps with overfitting verification
+        if args.debug:
+            original_val_size = len(val_dataset)
+            val_dataset = create_debug_subset(val_dataset, args.debug_samples)
+            print(f"Process {rank}: DEBUG MODE - Using {len(val_dataset)} validation samples out of {original_val_size}")
+        
         # Use DistributedSampler for distributed evaluation
         if args.distributed:
             val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
@@ -512,11 +551,16 @@ def main_worker(rank, world_size, args):
         print(f"Process {rank}: Validation dataset loaded with {len(val_dataset)} images")
 
     # Collect parameters that require gradients (decoder and LORA parameters)
+    # Use higher learning rate in debug mode
+    lr = args.debug_lr if args.debug else learning_rate
     optimizer = optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=learning_rate,
+        lr=lr,
         weight_decay=weight_decay
     )
+    
+    if args.debug:
+        print(f"Process {rank}: DEBUG MODE - Using learning rate: {lr}")
     
     # Load optimizer state if resuming training
     if args.checkpoint and os.path.exists(args.checkpoint) and not args.only_evaluate:
@@ -524,8 +568,16 @@ def main_worker(rank, world_size, args):
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    print(f"Process {rank}: Starting training for {num_epochs} epochs")
-    for epoch in range(start_epoch, num_epochs):
+    # Use more epochs in debug mode for overfitting
+    epochs_to_train = debug_epochs if args.debug else num_epochs
+    print(f"Process {rank}: Starting training for {epochs_to_train} epochs")
+    
+    # Set validation frequency more frequent in debug mode for better monitoring
+    val_freq = max(1, args.val_frequency // 5) if args.debug else args.val_frequency
+    if args.debug and rank == 0:
+        print(f"Process {rank}: DEBUG MODE - Validating every {val_freq} epochs")
+        
+    for epoch in range(start_epoch, epochs_to_train):
         # Set epoch for distributed sampler
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -597,7 +649,7 @@ def main_worker(rank, world_size, args):
             metrics_history['train_loss'].append(epoch_loss)
         
         # Validation phase
-        if val_dataloader is not None and (epoch + 1) % args.val_frequency == 0:
+        if val_dataloader is not None and (epoch + 1) % val_freq == 0:
             model.eval()
             
             # Only rank 0 runs validation and reports metrics
@@ -702,6 +754,14 @@ def main():
                        help='Number of GPUs to use for distributed training')
     parser.add_argument('--dist_url', default='env://', type=str,
                        help='URL used to set up distributed training')
+                       
+    # Debug/Overfit mode options
+    parser.add_argument('--debug', action='store_true', 
+                       help='Enable debug/overfitting mode on a small subset of data')
+    parser.add_argument('--debug_samples', type=int, default=debug_dataset_size,
+                       help='Number of samples to use in debug/overfit mode')
+    parser.add_argument('--debug_lr', type=float, default=debug_learning_rate,
+                       help='Learning rate to use in debug/overfit mode')
                        
     # Loss and matcher options
     parser.add_argument('--set_cost_class', type=float, default=set_cost_class,
