@@ -25,3 +25,19 @@ num_classes = 91    # For example, COCO has 91 classes
 weight_decay = 1e-4
 gradient_accumulation_steps = 1  # For larger effective batch sizes with limited GPU memory
 gradient_clip_val = 1.0  # For gradient clipping to prevent exploding gradients
+
+# Hungarian Matcher parameters
+set_cost_class = 1.0    # Weight for the classification cost in Hungarian matching
+set_cost_bbox = 5.0     # Weight for the L1 bbox cost in Hungarian matching
+set_cost_giou = 2.0     # Weight for the GIoU cost in Hungarian matching
+
+# Focal Loss parameters
+focal_alpha = 0.25      # Alpha parameter in focal loss
+focal_gamma = 2.0       # Gamma parameter in focal loss
+
+# Loss weights for the combined loss
+loss_weights = {
+    'loss_ce': 1.0,     # Weight for classification (focal) loss
+    'loss_bbox': 5.0,   # Weight for L1 box loss
+    'loss_giou': 2.0    # Weight for GIoU loss
+}

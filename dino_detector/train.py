@@ -17,10 +17,14 @@ from tqdm import tqdm
 from dino_detector.models.detector import DINOv2ObjectDetector
 from dino_detector.dataset import COCODataset, COCOTestDataset, collate_fn
 from dino_detector.utils import evaluate_coco, compute_coco_metrics
+from dino_detector.matching import HungarianMatcher, build_matcher
+from dino_detector.losses import SetCriterion, build_criterion
 from dino_detector.config import (
     batch_size, num_epochs, learning_rate, weight_decay, num_workers,
     distributed_backend, find_unused_parameters, gradient_accumulation_steps,
-    gradient_clip_val
+    gradient_clip_val,
+    set_cost_class, set_cost_bbox, set_cost_giou, focal_alpha, focal_gamma,
+    loss_weights, num_classes
 )
 from torchvision import transforms
 import matplotlib.pyplot as plt
@@ -33,25 +37,36 @@ COCO_URLS = {
     'annotations': 'http://images.cocodataset.org/annotations/annotations_trainval2017.zip'
 }
 
-# Dummy loss function for demonstration
-def dummy_loss(outputs):
+# Create losses and matcher
+def create_criterion(args):
     """
-    A simplified loss function for demonstration purposes.
-    
-    In a real-world implementation, you would need to implement:
-    1. Bipartite matching (e.g., Hungarian algorithm) to assign predictions to ground truth
-    2. Classification loss (e.g., focal loss)
-    3. Bounding box regression loss (e.g., L1 or GIoU loss)
+    Create and return the criterion and matcher for object detection.
     
     Args:
-        outputs: dict with "pred_logits" and "pred_boxes"
+        args: Command line arguments
         
     Returns:
-        A scalar loss value
+        criterion: Loss criterion with Hungarian matching and losses
     """
-    # Here we simply return the sum of logits and bbox predictions as a dummy loss.
-    loss = outputs["pred_logits"].sum() + outputs["pred_boxes"].sum()
-    return loss
+    # Create the matcher
+    matcher = HungarianMatcher(
+        cost_class=set_cost_class,
+        cost_bbox=set_cost_bbox,
+        cost_giou=set_cost_giou,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma
+    )
+    
+    # Create the criterion
+    criterion = SetCriterion(
+        matcher=matcher,
+        num_classes=num_classes,
+        weight_dict=loss_weights,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma
+    )
+    
+    return criterion
 
 def validate(model, val_dataloader, device, epoch, output_dir):
     """
@@ -333,6 +348,10 @@ def main_worker(rank, world_size, args):
     model = DINOv2ObjectDetector()
     model = model.to(device)
     
+    # Create the criterion for loss computation
+    criterion = create_criterion(args)
+    criterion = criterion.to(device)
+    
     # Wrap the model with DDP if using distributed training
     if args.distributed:
         model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=find_unused_parameters)
@@ -524,6 +543,10 @@ def main_worker(rank, world_size, args):
         for batch_idx, (images, targets) in enumerate(iterator):
             images = images.to(device)
             
+            # Process targets to ensure they are on the correct device
+            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                       for k, v in t.items()} for t in targets]
+            
             # Zero gradients at the beginning of the batch
             if batch_idx % gradient_accumulation_steps == 0:
                 optimizer.zero_grad()
@@ -531,8 +554,9 @@ def main_worker(rank, world_size, args):
             # Forward pass
             outputs = model(images)
             
-            # Compute loss
-            loss = dummy_loss(outputs)
+            # Compute loss using criterion with Hungarian matching
+            loss_dict = criterion(outputs, targets)
+            loss = sum(loss_dict.values())
             
             # Backward pass and optimize with gradient accumulation
             loss = loss / gradient_accumulation_steps
@@ -550,7 +574,10 @@ def main_worker(rank, world_size, args):
             # Update statistics
             running_loss += loss.item()
             if rank == 0:
-                pbar.set_postfix(loss=running_loss / (pbar.n + 1))
+                # Display individual loss components
+                loss_str = f"total: {loss.item():.3f} "
+                loss_str += " ".join(f"{k}: {v.item():.3f}" for k, v in loss_dict.items())
+                pbar.set_postfix_str(loss_str)
                 
         # Calculate average loss across all processes
         if args.distributed:
@@ -675,6 +702,18 @@ def main():
                        help='Number of GPUs to use for distributed training')
     parser.add_argument('--dist_url', default='env://', type=str,
                        help='URL used to set up distributed training')
+                       
+    # Loss and matcher options
+    parser.add_argument('--set_cost_class', type=float, default=set_cost_class,
+                       help='Class cost coefficient for Hungarian matching')
+    parser.add_argument('--set_cost_bbox', type=float, default=set_cost_bbox,
+                       help='L1 box cost coefficient for Hungarian matching')
+    parser.add_argument('--set_cost_giou', type=float, default=set_cost_giou,
+                       help='GIoU cost coefficient for Hungarian matching')
+    parser.add_argument('--focal_alpha', type=float, default=focal_alpha,
+                       help='Alpha parameter for focal loss')
+    parser.add_argument('--focal_gamma', type=float, default=focal_gamma,
+                       help='Gamma parameter for focal loss')
     
     args = parser.parse_args()
     

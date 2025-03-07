@@ -88,6 +88,78 @@ def box_cxcywh_to_xyxy(x):
         return np.concatenate(b, axis=-1)
 
 
+def box_xyxy_to_cxcywh(x):
+    """
+    Convert bounding box from (x1, y1, x2, y2) format to (center_x, center_y, width, height) format.
+    
+    Args:
+        x: tensor of shape (N, 4) where N is the number of boxes
+        
+    Returns:
+        Converted boxes in (cx, cy, w, h) format
+    """
+    x0, y0, x1, y1 = x.unbind(-1)
+    b = [(x0 + x1) / 2, (y0 + y1) / 2,
+         (x1 - x0), (y1 - y0)]
+    return torch.stack(b, dim=-1)
+
+
+def box_area(boxes):
+    """
+    Compute the area of bounding boxes.
+    
+    Args:
+        boxes: tensor of shape (..., 4) in (x1, y1, x2, y2) format
+        
+    Returns:
+        area: tensor of shape (...)
+    """
+    return (boxes[..., 2] - boxes[..., 0]) * (boxes[..., 3] - boxes[..., 1])
+
+
+def generalized_box_iou(boxes1, boxes2):
+    """
+    Compute the generalized IoU between two sets of boxes.
+    
+    Args:
+        boxes1: tensor of shape (N, 4) in (x1, y1, x2, y2) format
+        boxes2: tensor of shape (M, 4) in (x1, y1, x2, y2) format
+        
+    Returns:
+        giou: tensor of shape (N, M) with pairwise generalized IoU values
+    """
+    # Compute areas of boxes
+    area1 = box_area(boxes1)  # (N,)
+    area2 = box_area(boxes2)  # (M,)
+    
+    # Compute pair-wise intersection coordinates
+    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # (N, M, 2)
+    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # (N, M, 2)
+    
+    # Check if boxes intersect
+    wh = (rb - lt).clamp(min=0)  # (N, M, 2)
+    intersection = wh[:, :, 0] * wh[:, :, 1]  # (N, M)
+    
+    # Compute union
+    union = area1[:, None] + area2 - intersection
+    
+    # Compute IoU
+    iou = intersection / union
+    
+    # Compute the smallest enclosing box
+    lt_enclosing = torch.min(boxes1[:, None, :2], boxes2[:, :2])  # (N, M, 2)
+    rb_enclosing = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])  # (N, M, 2)
+    
+    # Calculate area of enclosing box
+    wh_enclosing = (rb_enclosing - lt_enclosing).clamp(min=0)  # (N, M, 2)
+    area_enclosing = wh_enclosing[:, :, 0] * wh_enclosing[:, :, 1]  # (N, M)
+    
+    # Compute GIoU
+    giou = iou - (area_enclosing - union) / area_enclosing
+    
+    return giou
+
+
 def evaluate_coco(model, dataloader, device, output_file=None):
     """
     Evaluate the model on COCO dataset.
