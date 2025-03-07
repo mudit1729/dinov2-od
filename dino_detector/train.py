@@ -6,13 +6,24 @@ from torch.utils.data import DataLoader
 import os
 import argparse
 import json
+import sys
+import urllib.request
+import zipfile
+from tqdm import tqdm
 from dino_detector.models.detector import DINOv2ObjectDetector
 from dino_detector.dataset import COCODataset, COCOTestDataset
 from dino_detector.utils import evaluate_coco, compute_coco_metrics
 from dino_detector.config import batch_size, num_epochs, learning_rate, weight_decay, num_workers
 from torchvision import transforms
-from tqdm import tqdm
 import matplotlib.pyplot as plt
+
+# COCO dataset URLs
+COCO_URLS = {
+    'train_images': 'http://images.cocodataset.org/zips/train2017.zip',
+    'val_images': 'http://images.cocodataset.org/zips/val2017.zip',
+    'test_images': 'http://images.cocodataset.org/zips/test2017.zip',
+    'annotations': 'http://images.cocodataset.org/annotations/annotations_trainval2017.zip'
+}
 
 # Dummy loss function for demonstration
 def dummy_loss(outputs):
@@ -109,18 +120,159 @@ def plot_metrics(metrics_history, output_dir):
         plt.savefig(os.path.join(output_dir, 'validation_ap.png'))
         plt.close()
 
+def download_file(url, destination, desc=None):
+    """
+    Download a file with progress bar.
+    
+    Args:
+        url: URL to download
+        destination: Path to save the file
+        desc: Description for the progress bar
+    """
+    if not desc:
+        desc = os.path.basename(destination)
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    
+    # Check if file already exists
+    if os.path.exists(destination):
+        print(f"{desc} already exists. Skipping download.")
+        return
+    
+    # Download with progress bar
+    with tqdm(unit='B', unit_scale=True, unit_divisor=1024, desc=desc) as progress:
+        def report_progress(count, block_size, total_size):
+            if total_size > 0:
+                progress.total = total_size
+                progress.update(count * block_size - progress.n)
+        
+        urllib.request.urlretrieve(url, destination, reporthook=report_progress)
+
+def extract_archive(archive_path, extract_dir, desc=None):
+    """
+    Extract an archive file.
+    
+    Args:
+        archive_path: Path to the archive file
+        extract_dir: Directory to extract to
+        desc: Description for the progress bar
+    """
+    if not desc:
+        desc = f"Extracting {os.path.basename(archive_path)}"
+    
+    print(f"{desc}...")
+    
+    # Create directory if it doesn't exist
+    os.makedirs(extract_dir, exist_ok=True)
+    
+    # Extract based on file extension
+    if archive_path.endswith('.zip'):
+        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
+            total_files = len(zip_ref.namelist())
+            with tqdm(total=total_files, desc=desc) as pbar:
+                for file in zip_ref.namelist():
+                    zip_ref.extract(file, extract_dir)
+                    pbar.update(1)
+    else:
+        print(f"Unsupported archive format: {archive_path}")
+
+def download_coco_dataset(args):
+    """
+    Download and extract COCO dataset based on command line arguments.
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        dict: Updated argument namespace with dataset paths
+    """
+    data_dir = args.data_dir
+    os.makedirs(data_dir, exist_ok=True)
+    
+    downloads_dir = os.path.join(data_dir, 'downloads')
+    os.makedirs(downloads_dir, exist_ok=True)
+    
+    # Determine which parts of the dataset to download
+    download_parts = []
+    
+    if args.download_train_data:
+        if not args.train_images or not args.train_annotations:
+            download_parts.extend(['train_images', 'annotations'])
+    
+    if args.download_val_data:
+        if not args.val_images or not args.val_annotations:
+            download_parts.extend(['val_images', 'annotations'])
+    
+    if args.download_test_data:
+        if not args.testdev_images:
+            download_parts.append('test_images')
+    
+    # Remove duplicates
+    download_parts = list(set(download_parts))
+    
+    if not download_parts:
+        return args
+    
+    # Download and extract the specified parts
+    for part in download_parts:
+        # Download
+        download_file(
+            COCO_URLS[part],
+            os.path.join(downloads_dir, f"{part}.zip"),
+            f"Downloading {part}"
+        )
+        
+        # Extract
+        extract_archive(
+            os.path.join(downloads_dir, f"{part}.zip"),
+            data_dir,
+            f"Extracting {part}"
+        )
+    
+    # Update paths in args if not provided
+    if args.download_train_data and (not args.train_images or not args.train_annotations):
+        args.train_images = os.path.join(data_dir, 'train2017')
+        args.train_annotations = os.path.join(data_dir, 'annotations', 'instances_train2017.json')
+        print(f"Set training paths to:\n- Images: {args.train_images}\n- Annotations: {args.train_annotations}")
+    
+    if args.download_val_data and (not args.val_images or not args.val_annotations):
+        args.val_images = os.path.join(data_dir, 'val2017')
+        args.val_annotations = os.path.join(data_dir, 'annotations', 'instances_val2017.json')
+        print(f"Set validation paths to:\n- Images: {args.val_images}\n- Annotations: {args.val_annotations}")
+    
+    if args.download_test_data and not args.testdev_images:
+        args.testdev_images = os.path.join(data_dir, 'test2017')
+        print(f"Set test-dev path to: {args.testdev_images}")
+    
+    return args
+
 def main():
     parser = argparse.ArgumentParser(description='Train DINOv2 Object Detector')
-    parser.add_argument('--train_images', type=str, default="path/to/coco/train2017", 
+    
+    # Dataset paths
+    parser.add_argument('--train_images', type=str, default="", 
                         help='Path to training images')
-    parser.add_argument('--train_annotations', type=str, default="path/to/coco/annotations/instances_train2017.json", 
+    parser.add_argument('--train_annotations', type=str, default="", 
                         help='Path to training annotations')
-    parser.add_argument('--val_images', type=str, default="path/to/coco/val2017", 
+    parser.add_argument('--val_images', type=str, default="", 
                         help='Path to validation images')
-    parser.add_argument('--val_annotations', type=str, default="path/to/coco/annotations/instances_val2017.json", 
+    parser.add_argument('--val_annotations', type=str, default="", 
                         help='Path to validation annotations')
     parser.add_argument('--testdev_images', type=str, default="", 
                         help='Path to test-dev images (optional)')
+    
+    # Dataset download options
+    parser.add_argument('--data_dir', type=str, default="coco_data",
+                        help='Directory to store downloaded dataset')
+    parser.add_argument('--download_train_data', action='store_true',
+                        help='Download COCO training data')
+    parser.add_argument('--download_val_data', action='store_true',
+                        help='Download COCO validation data')
+    parser.add_argument('--download_test_data', action='store_true',
+                        help='Download COCO test-dev data')
+    
+    # Training options
     parser.add_argument('--output_dir', type=str, default="outputs", 
                         help='Directory to save outputs')
     parser.add_argument('--checkpoint', type=str, default="", 
@@ -134,6 +286,25 @@ def main():
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Download COCO dataset if requested
+    if args.download_train_data or args.download_val_data or args.download_test_data:
+        args = download_coco_dataset(args)
+        
+    # Validate that we have at least training data for training or validation data for evaluation
+    if not args.only_evaluate and (not args.train_images or not args.train_annotations):
+        print("Error: Training images and annotations are required for training.")
+        print("       Use --download_train_data to download COCO training data")
+        print("       or provide --train_images and --train_annotations paths.")
+        return
+        
+    if args.only_evaluate and not (args.val_images and args.val_annotations) and not args.testdev_images:
+        print("Error: Validation or test-dev images are required for evaluation.")
+        print("       Use --download_val_data to download COCO validation data")
+        print("       or provide --val_images and --val_annotations paths.")
+        print("       Alternatively, use --download_test_data to download test-dev data")
+        print("       or provide --testdev_images path.")
+        return
     
     # Define transforms for input images (resize and convert to tensor)
     transform = transforms.Compose([

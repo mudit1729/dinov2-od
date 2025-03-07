@@ -27,25 +27,43 @@ pip install -e .
 
 ## Usage
 
-### Downloading COCO Dataset
+### Downloading COCO Dataset and Training
 
-We provide a script to automatically download the COCO dataset and run training:
+You can download the COCO dataset and train in a single step using the integrated download functionality:
 
 ```bash
-# Download training data and run training
-python download_coco.py --download_train --train --output_dir outputs
+# Download COCO training data and train
+python -m dino_detector.train --download_train_data --output_dir outputs
 
 # Download both training and validation data
-python download_coco.py --download_train --download_val --train --output_dir outputs
-
-# Download test data for evaluation
-python download_coco.py --download_test --output_dir test_outputs
+python -m dino_detector.train --download_train_data --download_val_data --output_dir outputs
 
 # Resume from checkpoint after downloading data
-python download_coco.py --download_train --download_val --train --checkpoint outputs/dino_detector_epoch_20.pth
+python -m dino_detector.train --download_train_data --checkpoint outputs/dino_detector_epoch_20.pth
 ```
 
-This script will download the specified parts of the COCO dataset, extract them, and optionally run training with the correct paths. See `python download_coco.py --help` for more options.
+For evaluation with downloaded data:
+
+```bash
+# Download validation data and evaluate a trained model
+python -m dino_detector.train --download_val_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
+
+# Download test-dev data and evaluate
+python -m dino_detector.train --download_test_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
+```
+
+We also provide a standalone script to just download the COCO dataset:
+
+```bash
+# Just download training data
+python download_coco.py --download_train
+
+# Download both training and validation data
+python download_coco.py --download_train --download_val 
+
+# Download test data
+python download_coco.py --download_test
+```
 
 ### Training Manually
 
