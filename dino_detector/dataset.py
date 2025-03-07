@@ -1,6 +1,7 @@
 # dataset.py
 import torch
 from torch.utils.data import Dataset
+from torch.utils.data.dataloader import default_collate
 from PIL import Image
 import os
 import json
@@ -123,3 +124,29 @@ class COCOTestDataset(Dataset):
             image = self.transform(image)
             
         return image, target
+def collate_fn(batch):
+    """
+    Custom collate function to handle variable sized annotations in the batch.
+    
+    Args:
+        batch: List of (image, target) tuples from dataset
+        
+    Returns:
+        tuple: (images, targets) where:
+            - images is a tensor of shape [batch_size, C, H, W]
+            - targets is a list of dictionaries
+    """
+    images = []
+    targets = []
+    
+    for image, target in batch:
+        images.append(image)
+        targets.append(target)
+    
+    # Stack images into a single tensor
+    images = torch.stack(images, dim=0)
+    
+    # Keep targets as a list of dictionaries
+    # No need to stack or pad since we're keeping it as a list
+    
+    return images, targets

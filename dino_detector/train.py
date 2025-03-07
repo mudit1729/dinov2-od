@@ -11,7 +11,7 @@ import urllib.request
 import zipfile
 from tqdm import tqdm
 from dino_detector.models.detector import DINOv2ObjectDetector
-from dino_detector.dataset import COCODataset, COCOTestDataset
+from dino_detector.dataset import COCODataset, COCOTestDataset, collate_fn
 from dino_detector.utils import evaluate_coco, compute_coco_metrics
 from dino_detector.config import batch_size, num_epochs, learning_rate, weight_decay, num_workers
 from torchvision import transforms
@@ -352,7 +352,8 @@ def main():
                 test_dataset, 
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=num_workers
+                num_workers=num_workers,
+                collate_fn=collate_fn
             )
             print(f"Test dataset loaded with {len(test_dataset)} images")
             
@@ -369,7 +370,8 @@ def main():
                 val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=num_workers
+                num_workers=num_workers,
+                collate_fn=collate_fn
             )
             print(f"Validation dataset loaded with {len(val_dataset)} images")
             
@@ -385,7 +387,8 @@ def main():
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True, 
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=collate_fn
     )
     print(f"Training dataset loaded with {len(train_dataset)} images")
     
@@ -399,7 +402,8 @@ def main():
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers
+            num_workers=num_workers,
+            collate_fn=collate_fn
         )
         print(f"Validation dataset loaded with {len(val_dataset)} images")
 
@@ -491,7 +495,8 @@ def main():
             test_dataset, 
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers
+            num_workers=num_workers,
+            collate_fn=collate_fn
         )
         
         # Generate predictions for test-dev
