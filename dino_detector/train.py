@@ -2,7 +2,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import os
 import argparse
 import json
@@ -13,7 +17,11 @@ from tqdm import tqdm
 from dino_detector.models.detector import DINOv2ObjectDetector
 from dino_detector.dataset import COCODataset, COCOTestDataset, collate_fn
 from dino_detector.utils import evaluate_coco, compute_coco_metrics
-from dino_detector.config import batch_size, num_epochs, learning_rate, weight_decay, num_workers
+from dino_detector.config import (
+    batch_size, num_epochs, learning_rate, weight_decay, num_workers,
+    distributed_backend, find_unused_parameters, gradient_accumulation_steps,
+    gradient_clip_val
+)
 from torchvision import transforms
 import matplotlib.pyplot as plt
 
@@ -247,6 +255,384 @@ def download_coco_dataset(args):
     
     return args
 
+def setup_distributed(rank, world_size):
+    """
+    Initialize the distributed environment.
+    
+    Args:
+        rank: Unique identifier of the process
+        world_size: Total number of processes
+    """
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    
+    # Initialize the process group
+    dist.init_process_group(backend=distributed_backend, rank=rank, world_size=world_size)
+    
+    # Set cuda device for this process
+    torch.cuda.set_device(rank)
+
+def cleanup_distributed():
+    """
+    Clean up the distributed environment.
+    """
+    dist.destroy_process_group()
+
+def main_worker(rank, world_size, args):
+    """
+    Main worker function for distributed training.
+    
+    Args:
+        rank: Unique identifier of the process
+        world_size: Total number of processes
+        args: Command line arguments
+    """
+    # Initialize distributed environment
+    if args.distributed:
+        setup_distributed(rank, world_size)
+        print(f"Initialized process group: rank {rank}/{world_size}")
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Download COCO dataset if requested
+    if rank == 0 and (args.download_train_data or args.download_val_data or args.download_test_data):
+        args = download_coco_dataset(args)
+        
+    if args.distributed:
+        # Wait for rank 0 to download data
+        dist.barrier()
+        
+    # Validate that we have at least training data for training or validation data for evaluation
+    if not args.only_evaluate and (not args.train_images or not args.train_annotations):
+        print("Error: Training images and annotations are required for training.")
+        print("       Use --download_train_data to download COCO training data")
+        print("       or provide --train_images and --train_annotations paths.")
+        return
+        
+    if args.only_evaluate and not (args.val_images and args.val_annotations) and not args.testdev_images:
+        print("Error: Validation or test-dev images are required for evaluation.")
+        print("       Use --download_val_data to download COCO validation data")
+        print("       or provide --val_images and --val_annotations paths.")
+        print("       Alternatively, use --download_test_data to download test-dev data")
+        print("       or provide --testdev_images path.")
+        return
+    
+    # Define transforms for input images (resize and convert to tensor)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+
+    # Initialize device
+    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    print(f"Process {rank}: Using device: {device}")
+    
+    # Initialize detector model
+    print(f"Process {rank}: Initializing DINOv2 Object Detector...")
+    model = DINOv2ObjectDetector()
+    model = model.to(device)
+    
+    # Wrap the model with DDP if using distributed training
+    if args.distributed:
+        model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=find_unused_parameters)
+    
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    metrics_history = {
+        'epochs': [], 'train_loss': [],
+        'val_epochs': [], 'val_ap': [], 'val_ap50': [], 'val_ap75': []
+    }
+    
+    if args.checkpoint and os.path.exists(args.checkpoint):
+        print(f"Process {rank}: Loading checkpoint from {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        
+        if args.distributed:
+            # Load model state dict for DDP model (need to handle 'module.' prefix)
+            state_dict = checkpoint['model_state_dict']
+            if not any(k.startswith('module.') for k in state_dict.keys()):
+                state_dict = {'module.' + k: v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
+        else:
+            # Remove 'module.' prefix if present for non-DDP model
+            state_dict = checkpoint['model_state_dict']
+            if any(k.startswith('module.') for k in state_dict.keys()):
+                state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
+            
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        
+        # Load metrics history if available (only on rank 0)
+        if rank == 0 and 'metrics_history' in checkpoint:
+            metrics_history = checkpoint['metrics_history']
+            
+        print(f"Process {rank}: Resuming from epoch {start_epoch}")
+    
+    # If only evaluating, skip to validation
+    if args.only_evaluate:
+        print(f"Process {rank}: Running evaluation only...")
+        
+        if args.testdev_images:
+            # Test-dev evaluation
+            print(f"Process {rank}: Evaluating on test-dev set: {args.testdev_images}")
+            test_dataset = COCOTestDataset(args.testdev_images, transform=transform)
+            
+            # Use DistributedSampler for distributed evaluation
+            if args.distributed:
+                test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+                test_dataloader = DataLoader(
+                    test_dataset, 
+                    batch_size=batch_size,
+                    sampler=test_sampler,
+                    num_workers=num_workers,
+                    collate_fn=collate_fn
+                )
+            else:
+                test_dataloader = DataLoader(
+                    test_dataset, 
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=num_workers,
+                    collate_fn=collate_fn
+                )
+            
+            print(f"Process {rank}: Test dataset loaded with {len(test_dataset)} images")
+            
+            # Generate predictions for test-dev
+            test_results_file = os.path.join(args.output_dir, f"testdev_predictions_rank{rank}.json")
+            model.eval()
+            test_results = evaluate_coco(model, test_dataloader, device, test_results_file)
+            print(f"Process {rank}: Test-dev predictions saved to {test_results_file}")
+        
+        # Validation set evaluation
+        if os.path.exists(args.val_images) and os.path.exists(args.val_annotations):
+            val_dataset = COCODataset(args.val_images, args.val_annotations, transform=transform)
+            
+            # Use DistributedSampler for distributed evaluation
+            if args.distributed:
+                val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+                val_dataloader = DataLoader(
+                    val_dataset,
+                    batch_size=batch_size,
+                    sampler=val_sampler,
+                    num_workers=num_workers,
+                    collate_fn=collate_fn
+                )
+            else:
+                val_dataloader = DataLoader(
+                    val_dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=num_workers,
+                    collate_fn=collate_fn
+                )
+                
+            print(f"Process {rank}: Validation dataset loaded with {len(val_dataset)} images")
+            
+            model.eval()
+            _ = validate(model, val_dataloader, device, 0, args.output_dir)
+        
+        # Clean up distributed environment
+        if args.distributed:
+            cleanup_distributed()
+            
+        return
+    
+    # Initialize training dataset and dataloader
+    print(f"Process {rank}: Loading training dataset from {args.train_images}")
+    train_dataset = COCODataset(args.train_images, args.train_annotations, transform=transform)
+    
+    # Use DistributedSampler for distributed training
+    if args.distributed:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        train_dataloader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            sampler=train_sampler, 
+            num_workers=num_workers,
+            collate_fn=collate_fn
+        )
+    else:
+        train_dataloader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=num_workers,
+            collate_fn=collate_fn
+        )
+        
+    print(f"Process {rank}: Training dataset loaded with {len(train_dataset)} images")
+    
+    # Initialize validation dataset and dataloader if paths exist
+    val_dataloader = None
+    if os.path.exists(args.val_images) and os.path.exists(args.val_annotations):
+        print(f"Process {rank}: Loading validation dataset from {args.val_images}")
+        val_dataset = COCODataset(args.val_images, args.val_annotations, transform=transform)
+        val_dataset.coco_path = args.val_annotations  # Store annotation path for evaluation
+        
+        # Use DistributedSampler for distributed evaluation
+        if args.distributed:
+            val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+            val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                sampler=val_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn
+            )
+        else:
+            val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                collate_fn=collate_fn
+            )
+            
+        print(f"Process {rank}: Validation dataset loaded with {len(val_dataset)} images")
+
+    # Collect parameters that require gradients (decoder and LORA parameters)
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=learning_rate,
+        weight_decay=weight_decay
+    )
+    
+    # Load optimizer state if resuming training
+    if args.checkpoint and os.path.exists(args.checkpoint) and not args.only_evaluate:
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    print(f"Process {rank}: Starting training for {num_epochs} epochs")
+    for epoch in range(start_epoch, num_epochs):
+        # Set epoch for distributed sampler
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
+            
+        # Training phase
+        model.train()
+        running_loss = 0.0
+        
+        if rank == 0:  # Only rank 0 shows progress bar
+            pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            iterator = pbar
+        else:
+            iterator = train_dataloader
+        
+        for batch_idx, (images, targets) in enumerate(iterator):
+            images = images.to(device)
+            
+            # Zero gradients at the beginning of the batch
+            if batch_idx % gradient_accumulation_steps == 0:
+                optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = model(images)
+            
+            # Compute loss
+            loss = dummy_loss(outputs)
+            
+            # Backward pass and optimize with gradient accumulation
+            loss = loss / gradient_accumulation_steps
+            loss.backward()
+            
+            # Apply gradient clipping
+            if gradient_clip_val > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
+                
+            # Step optimizer every gradient_accumulation_steps
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            # Update statistics
+            running_loss += loss.item()
+            if rank == 0:
+                pbar.set_postfix(loss=running_loss / (pbar.n + 1))
+                
+        # Calculate average loss across all processes
+        if args.distributed:
+            world_size = dist.get_world_size()
+            loss_tensor = torch.tensor(running_loss, device=device) / len(train_dataloader)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            epoch_loss = loss_tensor.item() / world_size
+        else:
+            epoch_loss = running_loss / len(train_dataloader)
+            
+        # Print epoch statistics (only rank 0)
+        if rank == 0:
+            print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
+            
+            # Update metrics history
+            metrics_history['epochs'].append(epoch + 1)
+            metrics_history['train_loss'].append(epoch_loss)
+        
+        # Validation phase
+        if val_dataloader is not None and (epoch + 1) % args.val_frequency == 0:
+            model.eval()
+            
+            # Only rank 0 runs validation and reports metrics
+            if rank == 0:
+                metrics = validate(model, val_dataloader, device, epoch + 1, args.output_dir)
+                
+                if metrics:
+                    # Update validation metrics history
+                    metrics_history['val_epochs'].append(epoch + 1)
+                    metrics_history['val_ap'].append(metrics['AP'])
+                    metrics_history['val_ap50'].append(metrics['AP50'])
+                    metrics_history['val_ap75'].append(metrics['AP75'])
+                    
+                # Plot metrics
+                plot_metrics(metrics_history, args.output_dir)
+            
+            # Wait for validation to finish before continuing training
+            if args.distributed:
+                dist.barrier()
+        
+        # Save checkpoint every 10 epochs or on the last epoch (only rank 0)
+        if rank == 0 and ((epoch + 1) % 10 == 0 or epoch == num_epochs - 1):
+            checkpoint_path = os.path.join(args.output_dir, f"dino_detector_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_loss,
+                'metrics_history': metrics_history
+            }, checkpoint_path)
+            print(f"Checkpoint saved to {checkpoint_path}")
+
+    # Save the final model (only rank 0)
+    if rank == 0:
+        final_model_path = os.path.join(args.output_dir, "dino_detector_final.pth")
+        torch.save(model.state_dict(), final_model_path)
+        print(f"Training complete. Final model saved to {final_model_path}")
+    
+    # Final evaluation on test-dev if provided
+    if rank == 0 and args.testdev_images:
+        print(f"Evaluating final model on test-dev set: {args.testdev_images}")
+        test_dataset = COCOTestDataset(args.testdev_images, transform=transform)
+        
+        # Use non-distributed dataloader for final evaluation on rank 0
+        test_dataloader = DataLoader(
+            test_dataset, 
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn
+        )
+        
+        # Generate predictions for test-dev
+        model.eval()
+        test_results_file = os.path.join(args.output_dir, "testdev_predictions_final.json")
+        test_results = evaluate_coco(model, test_dataloader, device, test_results_file)
+        print(f"Test-dev predictions saved to {test_results_file}")
+    
+    # Clean up distributed environment
+    if args.distributed:
+        cleanup_distributed()
+
 def main():
     parser = argparse.ArgumentParser(description='Train DINOv2 Object Detector')
     
@@ -282,228 +668,59 @@ def main():
     parser.add_argument('--only_evaluate', action='store_true', 
                         help='Only run evaluation, no training')
     
+    # Distributed training options
+    parser.add_argument('--distributed', action='store_true',
+                       help='Use distributed data parallel for multi-GPU training')
+    parser.add_argument('--world_size', type=int, default=torch.cuda.device_count(),
+                       help='Number of GPUs to use for distributed training')
+    parser.add_argument('--dist_url', default='env://', type=str,
+                       help='URL used to set up distributed training')
+    
     args = parser.parse_args()
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Download COCO dataset if requested
-    if args.download_train_data or args.download_val_data or args.download_test_data:
-        args = download_coco_dataset(args)
-        
-    # Validate that we have at least training data for training or validation data for evaluation
-    if not args.only_evaluate and (not args.train_images or not args.train_annotations):
-        print("Error: Training images and annotations are required for training.")
-        print("       Use --download_train_data to download COCO training data")
-        print("       or provide --train_images and --train_annotations paths.")
-        return
-        
-    if args.only_evaluate and not (args.val_images and args.val_annotations) and not args.testdev_images:
-        print("Error: Validation or test-dev images are required for evaluation.")
-        print("       Use --download_val_data to download COCO validation data")
-        print("       or provide --val_images and --val_annotations paths.")
-        print("       Alternatively, use --download_test_data to download test-dev data")
-        print("       or provide --testdev_images path.")
-        return
-    
-    # Define transforms for input images (resize and convert to tensor)
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-
-    # Initialize device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Initialize detector model
-    print("Initializing DINOv2 Object Detector...")
-    model = DINOv2ObjectDetector()
-    model = model.to(device)
-    
-    # Resume from checkpoint if provided
-    start_epoch = 0
-    metrics_history = {
-        'epochs': [], 'train_loss': [],
-        'val_epochs': [], 'val_ap': [], 'val_ap50': [], 'val_ap75': []
-    }
-    
-    if args.checkpoint and os.path.exists(args.checkpoint):
-        print(f"Loading checkpoint from {args.checkpoint}")
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0) + 1
-        
-        # Load metrics history if available
-        if 'metrics_history' in checkpoint:
-            metrics_history = checkpoint['metrics_history']
+    # For non-distributed mode, run normally
+    if not args.distributed:
+        # Validate data paths for the single-process run
+        if not args.only_evaluate and (not args.train_images or not args.train_annotations):
+            print("Error: Training images and annotations are required for training.")
+            print("       Use --download_train_data to download COCO training data")
+            print("       or provide --train_images and --train_annotations paths.")
+            return
             
-        print(f"Resuming from epoch {start_epoch}")
-    
-    # If only evaluating, skip to validation
-    if args.only_evaluate:
-        print("Running evaluation only...")
+        if args.only_evaluate and not (args.val_images and args.val_annotations) and not args.testdev_images:
+            print("Error: Validation or test-dev images are required for evaluation.")
+            print("       Use --download_val_data to download COCO validation data")
+            print("       or provide --val_images and --val_annotations paths.")
+            print("       Alternatively, use --download_test_data to download test-dev data")
+            print("       or provide --testdev_images path.")
+            return
         
-        if args.testdev_images:
-            # Test-dev evaluation
-            print(f"Evaluating on test-dev set: {args.testdev_images}")
-            test_dataset = COCOTestDataset(args.testdev_images, transform=transform)
-            test_dataloader = DataLoader(
-                test_dataset, 
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                collate_fn=collate_fn
-            )
-            print(f"Test dataset loaded with {len(test_dataset)} images")
+        # Download dataset if requested (for non-distributed mode)
+        if args.download_train_data or args.download_val_data or args.download_test_data:
+            args = download_coco_dataset(args)
+        
+        # Run main worker function with rank 0
+        main_worker(0, 1, args)
+    else:
+        # For distributed mode, spawn multiple processes
+        # Make sure world_size is set correctly
+        if args.world_size > torch.cuda.device_count():
+            print(f"Warning: Requested {args.world_size} GPUs but only {torch.cuda.device_count()} are available.")
+            args.world_size = torch.cuda.device_count()
+        
+        if args.world_size < 1:
+            print("Error: No GPUs available for distributed training.")
+            return
             
-            # Generate predictions for test-dev
-            test_results_file = os.path.join(args.output_dir, "testdev_predictions.json")
-            model.eval()
-            test_results = evaluate_coco(model, test_dataloader, device, test_results_file)
-            print(f"Test-dev predictions saved to {test_results_file}")
+        print(f"Starting distributed training with {args.world_size} GPUs")
         
-        # Validation set evaluation
-        if os.path.exists(args.val_images) and os.path.exists(args.val_annotations):
-            val_dataset = COCODataset(args.val_images, args.val_annotations, transform=transform)
-            val_dataloader = DataLoader(
-                val_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                collate_fn=collate_fn
-            )
-            print(f"Validation dataset loaded with {len(val_dataset)} images")
-            
-            model.eval()
-            _ = validate(model, val_dataloader, device, 0, args.output_dir)
-        
-        return
-    
-    # Initialize training dataset and dataloader
-    print(f"Loading training dataset from {args.train_images}")
-    train_dataset = COCODataset(args.train_images, args.train_annotations, transform=transform)
-    train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
-    print(f"Training dataset loaded with {len(train_dataset)} images")
-    
-    # Initialize validation dataset and dataloader if paths exist
-    val_dataloader = None
-    if os.path.exists(args.val_images) and os.path.exists(args.val_annotations):
-        print(f"Loading validation dataset from {args.val_images}")
-        val_dataset = COCODataset(args.val_images, args.val_annotations, transform=transform)
-        val_dataset.coco_path = args.val_annotations  # Store annotation path for evaluation
-        val_dataloader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=collate_fn
+        # Spawn processes for each GPU
+        mp.spawn(
+            main_worker,
+            args=(args.world_size, args),
+            nprocs=args.world_size,
+            join=True
         )
-        print(f"Validation dataset loaded with {len(val_dataset)} images")
-
-    # Collect parameters that require gradients (decoder and LORA parameters)
-    optimizer = optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    
-    # Load optimizer state if resuming training
-    if args.checkpoint and os.path.exists(args.checkpoint) and not args.only_evaluate:
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-    print(f"Starting training for {num_epochs} epochs")
-    for epoch in range(start_epoch, num_epochs):
-        # Training phase
-        model.train()
-        running_loss = 0.0
-        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        
-        for images, targets in pbar:
-            images = images.to(device)
-            
-            # Zero gradients
-            optimizer.zero_grad()
-            
-            # Forward pass
-            outputs = model(images)
-            
-            # Compute loss
-            loss = dummy_loss(outputs)
-            
-            # Backward pass and optimize
-            loss.backward()
-            optimizer.step()
-            
-            # Update statistics
-            running_loss += loss.item()
-            pbar.set_postfix(loss=running_loss / (pbar.n + 1))
-            
-        # Print epoch statistics
-        epoch_loss = running_loss / len(train_dataloader)
-        print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
-        
-        # Update metrics history
-        metrics_history['epochs'].append(epoch + 1)
-        metrics_history['train_loss'].append(epoch_loss)
-        
-        # Validation phase
-        if val_dataloader is not None and (epoch + 1) % args.val_frequency == 0:
-            model.eval()
-            metrics = validate(model, val_dataloader, device, epoch + 1, args.output_dir)
-            
-            if metrics:
-                # Update validation metrics history
-                metrics_history['val_epochs'].append(epoch + 1)
-                metrics_history['val_ap'].append(metrics['AP'])
-                metrics_history['val_ap50'].append(metrics['AP50'])
-                metrics_history['val_ap75'].append(metrics['AP75'])
-        
-        # Plot metrics
-        plot_metrics(metrics_history, args.output_dir)
-        
-        # Save checkpoint every 10 epochs or on the last epoch
-        if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
-            checkpoint_path = os.path.join(args.output_dir, f"dino_detector_epoch_{epoch+1}.pth")
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': epoch_loss,
-                'metrics_history': metrics_history
-            }, checkpoint_path)
-            print(f"Checkpoint saved to {checkpoint_path}")
-
-    # Save the final model
-    final_model_path = os.path.join(args.output_dir, "dino_detector_final.pth")
-    torch.save(model.state_dict(), final_model_path)
-    print(f"Training complete. Final model saved to {final_model_path}")
-    
-    # Final evaluation on test-dev if provided
-    if args.testdev_images:
-        print(f"Evaluating final model on test-dev set: {args.testdev_images}")
-        test_dataset = COCOTestDataset(args.testdev_images, transform=transform)
-        test_dataloader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=collate_fn
-        )
-        
-        # Generate predictions for test-dev
-        model.eval()
-        test_results_file = os.path.join(args.output_dir, "testdev_predictions_final.json")
-        test_results = evaluate_coco(model, test_dataloader, device, test_results_file)
-        print(f"Test-dev predictions saved to {test_results_file}")
 
 if __name__ == "__main__":
     main()
