@@ -111,6 +111,36 @@ python -m dino_detector.train \
   --only_evaluate
 ```
 
+### Debug/Overfit Mode
+
+The debug/overfit mode allows training on a small subset of data to verify model convergence:
+
+```bash
+# Run training in debug mode with default settings (32 samples)
+python -m dino_detector.train --debug --download_train_data
+
+# Customize the number of samples and learning rate
+python -m dino_detector.train --debug --debug_samples 64 --debug_lr 5e-4
+
+# Use specific data with debug mode
+python -m dino_detector.train \
+  --debug \
+  --train_images path/to/coco/train2017 \
+  --train_annotations path/to/coco/annotations/instances_train2017.json
+```
+
+The debug mode:
+- Uses a small subset of data (32 samples by default)
+- Runs for more epochs (100 by default instead of 50)
+- Uses a higher learning rate for faster convergence
+- Validates more frequently to monitor progress
+
+This mode is useful for:
+- Verifying that the model architecture is implemented correctly
+- Ensuring the loss functions are properly configured
+- Testing that the model can overfit before training on full data
+- Debugging gradient flow issues
+
 ## Model Architecture
 
 The model consists of three main components:
@@ -120,10 +150,11 @@ The model consists of three main components:
    - Freezes original weights for efficiency
    - Applies LoRA adapters to learn task-specific adaptations
 
-2. **DETR-style Decoder**:
-   - Transformer decoder with learned object queries
+2. **Transformer Decoder**:
+   - Supports both standard and deformable attention mechanisms
+   - Learned object queries for end-to-end detection
+   - Deformable attention for better convergence on complex scenes
    - Multi-head self and cross-attention mechanisms
-   - Processes features from the backbone to detect objects
 
 3. **Prediction Heads**:
    - Classification head for object categories
@@ -133,15 +164,18 @@ The model consists of three main components:
 
 ```
 dino_detector/
-├── config.py            # Configuration parameters
-├── dataset.py           # Dataset loading and processing
+├── config.py                  # Configuration parameters
+├── dataset.py                 # Dataset loading and processing
+├── losses.py                  # Loss functions with Hungarian matching
+├── matching.py                # Bipartite matching for predictions to GT
 ├── models/
-│   ├── __init__.py      # Model exports
-│   ├── dinov2_backbone.py # DINOv2 backbone with LoRA
-│   ├── detr_decoder.py  # DETR transformer decoder
-│   └── detector.py      # Full object detector model
-├── train.py             # Training script
-└── utils.py             # Utility functions and evaluation metrics
+│   ├── __init__.py            # Model exports
+│   ├── dinov2_backbone.py     # DINOv2 backbone with LoRA
+│   ├── detr_decoder.py        # Transformer decoder
+│   ├── deformable_attention.py# Deformable attention modules
+│   └── detector.py            # Full object detector model
+├── train.py                   # Training script
+└── utils.py                   # Utility functions and evaluation metrics
 ```
 
 ## Configuration
@@ -151,6 +185,9 @@ You can modify the model configuration in `dino_detector/config.py`:
 - Model parameters (DINOv2 variant, hidden dimensions, etc.)
 - Training hyperparameters (learning rate, batch size, etc.)
 - LoRA parameters (rank, alpha)
+- Deformable attention parameters (sampling points, modulation)
+- Debug mode settings (subset size, learning rate)
+- Loss function weights for Hungarian matching
 
 ## Evaluation Metrics
 
