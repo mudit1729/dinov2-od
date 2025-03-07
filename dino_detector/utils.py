@@ -1,5 +1,11 @@
 # utils.py
+import torch
 import torch.nn as nn
+import numpy as np
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+import json
+from tqdm import tqdm
 
 class MLP(nn.Module):
     """
@@ -58,3 +64,137 @@ class LoraLinear(nn.Module):
     def forward(self, x):
         # Original output plus scaled low-rank update
         return self.linear(x) + self.alpha * self.lora_B(self.lora_A(x))
+
+
+def box_cxcywh_to_xyxy(x):
+    """
+    Convert bounding box from (center_x, center_y, width, height) format to (x1, y1, x2, y2) format.
+    
+    Args:
+        x: tensor or array of shape (N, 4) where N is the number of boxes
+        
+    Returns:
+        Converted boxes in (x1, y1, x2, y2) format
+    """
+    x_c, y_c, w, h = x.unbind(-1) if isinstance(x, torch.Tensor) else np.split(x, 4, axis=-1)
+    
+    if isinstance(x, torch.Tensor):
+        b = [(x_c - 0.5 * w), (y_c - 0.5 * h),
+             (x_c + 0.5 * w), (y_c + 0.5 * h)]
+        return torch.stack(b, dim=-1)
+    else:
+        b = [x_c - 0.5 * w, y_c - 0.5 * h,
+             x_c + 0.5 * w, y_c + 0.5 * h]
+        return np.concatenate(b, axis=-1)
+
+
+def evaluate_coco(model, dataloader, device, output_file=None):
+    """
+    Evaluate the model on COCO dataset.
+    
+    Args:
+        model: The detector model
+        dataloader: DataLoader for the COCO dataset
+        device: Device to run evaluation on
+        output_file: Path to save COCO detection results
+        
+    Returns:
+        dict: Dictionary with evaluation metrics
+    """
+    model.eval()
+    results = []
+    
+    with torch.no_grad():
+        for images, targets in tqdm(dataloader, desc="Evaluating"):
+            images = images.to(device)
+            
+            # Forward pass to get predictions
+            outputs = model(images)
+            
+            # Process predictions for COCO format
+            pred_logits = outputs["pred_logits"]  # [batch_size, num_queries, num_classes]
+            pred_boxes = outputs["pred_boxes"]    # [batch_size, num_queries, 4]
+            
+            # Convert scores and apply confidence threshold
+            scores = torch.sigmoid(pred_logits)
+            
+            # For each image in the batch
+            for i, target in enumerate(targets):
+                img_id = target.get('image_id', i)
+                
+                # Process predictions for this image
+                img_scores = scores[i]  # [num_queries, num_classes]
+                img_boxes = pred_boxes[i]  # [num_queries, 4]
+                
+                # Convert boxes from (cx, cy, w, h) to (x1, y1, x2, y2)
+                img_boxes_xyxy = box_cxcywh_to_xyxy(img_boxes)
+                
+                # Select predictions with score > threshold for each class
+                for cls_idx in range(img_scores.shape[1]):
+                    if cls_idx == 0:  # Skip background class
+                        continue
+                        
+                    cls_scores = img_scores[:, cls_idx]
+                    keep = cls_scores > 0.05  # confidence threshold
+                    
+                    if not keep.any():
+                        continue
+                        
+                    cls_scores = cls_scores[keep]
+                    cls_boxes = img_boxes_xyxy[keep]
+                    
+                    # Create COCO detections
+                    for score, box in zip(cls_scores.cpu().numpy(), cls_boxes.cpu().numpy()):
+                        # Convert box to COCO format [x, y, width, height]
+                        x1, y1, x2, y2 = box
+                        coco_box = [float(x1), float(y1), float(x2-x1), float(y2-y1)]
+                        
+                        results.append({
+                            'image_id': int(img_id),
+                            'category_id': int(cls_idx),
+                            'bbox': coco_box,
+                            'score': float(score)
+                        })
+    
+    # Save results if output file is provided
+    if output_file is not None:
+        with open(output_file, 'w') as f:
+            json.dump(results, f)
+    
+    return results
+
+
+def compute_coco_metrics(results, annotation_file):
+    """
+    Compute COCO metrics given detection results and ground truth annotations.
+    
+    Args:
+        results: List of detection results in COCO format
+        annotation_file: Path to COCO ground truth annotations
+        
+    Returns:
+        dict: Dictionary with evaluation metrics
+    """
+    # Initialize COCO ground truth
+    coco_gt = COCO(annotation_file)
+    
+    # Create COCO detection object
+    coco_dt = coco_gt.loadRes(results)
+    
+    # Run COCO evaluation
+    coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+    
+    # Extract metrics
+    metrics = {
+        'AP': coco_eval.stats[0],  # AP @ IoU=0.50:0.95
+        'AP50': coco_eval.stats[1],  # AP @ IoU=0.50
+        'AP75': coco_eval.stats[2],  # AP @ IoU=0.75
+        'APs': coco_eval.stats[3],   # AP for small objects
+        'APm': coco_eval.stats[4],   # AP for medium objects
+        'APl': coco_eval.stats[5],   # AP for large objects
+    }
+    
+    return metrics

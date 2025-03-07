@@ -1,17 +1,79 @@
-# DINOv2 Object Detector
+# DINOv2 Object Detection
 
-This project implements an object detection system using a frozen DINOv2 vision transformer backbone with LoRA adapters and a DETR-style transformer decoder with learned object queries.
+This repository implements an object detection model using Facebook's DINOv2 (Vision Transformer) as the backbone feature extractor. The detector follows a DETR-like architecture with a transformer decoder on top of DINOv2 features.
 
-## 📋 Features
+## Features
 
-- **Efficient Fine-tuning**: Uses LoRA (Low-Rank Adaptation) to fine-tune the DINOv2 backbone efficiently with minimal trainable parameters
-- **DETR Architecture**: Implements a transformer decoder with object queries for end-to-end object detection
-- **Modular Design**: Separates backbone, decoder, and detection components for easy experimentation
-- **Customizable**: Easy to adjust hyperparameters like LoRA rank, decoder depth, and learning rate
+- Uses DINOv2 pretrained vision transformer as the backbone feature extractor
+- Implements a DETR-like decoder for object detection
+- Uses LoRA (Low-Rank Adaptation) for efficient fine-tuning
+- Supports COCO dataset format
+- Includes evaluation on COCO metrics (AP, AP50, AP75, etc.)
+- Supports training, validation, and test-dev evaluation
 
-## 🧠 Architecture
+## Installation
 
-The model architecture consists of three main components:
+```bash
+# Clone the repository
+git clone https://github.com/mudit1729/dinov2-od.git
+cd dinov2-od
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install the package in development mode
+pip install -e .
+```
+
+## Usage
+
+### Training
+
+```bash
+python -m dino_detector.train \
+  --train_images path/to/coco/train2017 \
+  --train_annotations path/to/coco/annotations/instances_train2017.json \
+  --val_images path/to/coco/val2017 \
+  --val_annotations path/to/coco/annotations/instances_val2017.json \
+  --output_dir outputs
+```
+
+### Resuming Training from Checkpoint
+
+```bash
+python -m dino_detector.train \
+  --train_images path/to/coco/train2017 \
+  --train_annotations path/to/coco/annotations/instances_train2017.json \
+  --val_images path/to/coco/val2017 \
+  --val_annotations path/to/coco/annotations/instances_val2017.json \
+  --output_dir outputs \
+  --checkpoint outputs/dino_detector_epoch_20.pth
+```
+
+### Evaluation Only
+
+```bash
+python -m dino_detector.train \
+  --val_images path/to/coco/val2017 \
+  --val_annotations path/to/coco/annotations/instances_val2017.json \
+  --output_dir eval_outputs \
+  --checkpoint outputs/dino_detector_final.pth \
+  --only_evaluate
+```
+
+### Test-Dev Evaluation
+
+```bash
+python -m dino_detector.train \
+  --testdev_images path/to/coco/test2017 \
+  --output_dir test_outputs \
+  --checkpoint outputs/dino_detector_final.pth \
+  --only_evaluate
+```
+
+## Model Architecture
+
+The model consists of three main components:
 
 1. **DINOv2 Backbone** (frozen with LoRA adapters):
    - Uses the pre-trained DINOv2 model from Hugging Face
@@ -27,45 +89,7 @@ The model architecture consists of three main components:
    - Classification head for object categories
    - Bounding box regression head using MLP
 
-## 🛠️ Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/dinov2-od.git
-cd dinov2-od
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## 💻 Usage
-
-### Training
-
-To train the model on your dataset:
-
-```bash
-python -m dino_detector.train
-```
-
-You can adjust training parameters in `dino_detector/config.py`.
-
-### Customizing the Model
-
-To experiment with different hyperparameters, modify `dino_detector/config.py`:
-
-```python
-# Change LoRA rank
-lora_r = 8  # Default is 4
-
-# Adjust decoder depth
-num_decoder_layers = 4  # Default is 6
-
-# Change learning rate
-learning_rate = 5e-5  # Default is 1e-4
-```
-
-## 📚 Project Structure
+## Project Structure
 
 ```
 dino_detector/
@@ -77,39 +101,50 @@ dino_detector/
 │   ├── detr_decoder.py  # DETR transformer decoder
 │   └── detector.py      # Full object detector model
 ├── train.py             # Training script
-└── utils.py             # Utility functions including LoRA implementation
+└── utils.py             # Utility functions and evaluation metrics
 ```
 
-## 📊 Research Notes
+## Configuration
 
-This implementation is designed for research experimentation. Some potential research directions:
+You can modify the model configuration in `dino_detector/config.py`:
 
-- Compare different LoRA ranks and their effect on performance
-- Experiment with the number of object queries and decoder layers
-- Analyze the effect of different learning rates on convergence
-- Compare performance with and without LoRA adapters
+- Model parameters (DINOv2 variant, hidden dimensions, etc.)
+- Training hyperparameters (learning rate, batch size, etc.)
+- LoRA parameters (rank, alpha)
 
-## 📝 Citation
+## Evaluation Metrics
+
+The model is evaluated using standard COCO evaluation metrics:
+
+- **AP**: Average Precision at IoU=0.50:0.95
+- **AP50**: Average Precision at IoU=0.50 
+- **AP75**: Average Precision at IoU=0.75
+- **APs**: Average Precision for small objects
+- **APm**: Average Precision for medium objects
+- **APl**: Average Precision for large objects
+
+## Citation
 
 If this code is useful for your research, please consider citing:
 
 ```
 @misc{dinov2-od,
-  author = {Your Name},
-  title = {DINOv2 Object Detector},
+  author = {Mudit Jain},
+  title = {DINOv2 Object Detection},
   year = {2023},
   publisher = {GitHub},
   journal = {GitHub repository},
-  howpublished = {\url{https://github.com/yourusername/dinov2-od}}
+  howpublished = {\url{https://github.com/mudit1729/dinov2-od}}
 }
 ```
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgements
+## Acknowledgments
 
 - [Facebook AI Research](https://ai.facebook.com/) for the DINOv2 model
 - [DETR](https://github.com/facebookresearch/detr) for the transformer decoder architecture
 - [LoRA](https://arxiv.org/abs/2106.09685) for the parameter-efficient fine-tuning method
+- [COCO Dataset](https://cocodataset.org) for the object detection benchmark

@@ -47,10 +47,77 @@ class COCODataset(Dataset):
         img_path = os.path.join(self.images_dir, img_info['file_name'])
         image = Image.open(img_path).convert("RGB")
         
-        # For simplicity, we return dummy targets.
-        target = {}
         # Process annotations for current image
-        target['annotations'] = self.annotations.get(img_id, [])
+        target = {
+            'image_id': img_id,
+            'annotations': self.annotations.get(img_id, []),
+            'orig_size': torch.as_tensor([img_info.get('height', 0), img_info.get('width', 0)]),
+            'filename': img_info['file_name']
+        }
+        
+        if self.transform is not None:
+            image = self.transform(image)
+            
+        return image, target
+        
+        
+class COCOTestDataset(Dataset):
+    """
+    COCO dataset specifically for test-dev evaluation.
+    """
+    def __init__(self, images_dir, annotation_file=None, transform=None):
+        """
+        Args:
+            images_dir: path to images directory
+            annotation_file: optional path to annotations (may not exist for test-dev)
+            transform: optional transforms to apply
+        """
+        self.images_dir = images_dir
+        self.transform = transform
+        
+        # If annotation file is provided, load it (useful for validation)
+        if annotation_file and os.path.exists(annotation_file):
+            with open(annotation_file, 'r') as f:
+                self.coco = json.load(f)
+            self.images = {img['id']: img for img in self.coco['images']}
+            self.image_ids = list(self.images.keys())
+        else:
+            # No annotations - just list all image files
+            self.image_files = [f for f in os.listdir(images_dir) 
+                               if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            self.image_ids = [int(os.path.splitext(f)[0]) for f in self.image_files]
+            self.images = {img_id: {'file_name': f, 'id': img_id} 
+                          for img_id, f in zip(self.image_ids, self.image_files)}
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx):
+        """
+        Get an image and minimal information for evaluation.
+        
+        Args:
+            idx: Index of the dataset item
+            
+        Returns:
+            tuple: (image, target) where image is the processed image tensor
+                  and target contains the image_id
+        """
+        # Get image information
+        img_id = self.image_ids[idx]
+        img_info = self.images[img_id]
+        img_path = os.path.join(self.images_dir, img_info['file_name'])
+        image = Image.open(img_path).convert("RGB")
+        
+        # Get original image size
+        width, height = image.size
+        
+        # Create minimal target information
+        target = {
+            'image_id': img_id,
+            'orig_size': torch.as_tensor([height, width]),
+            'filename': img_info['file_name']
+        }
         
         if self.transform is not None:
             image = self.transform(image)
