@@ -337,7 +337,7 @@ def main_worker(rank, world_size, args):
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Download COCO dataset if requested
+    # Download COCO dataset if requested (download first, validate after)
     if rank == 0 and (args.download_train_data or args.download_val_data or args.download_test_data):
         args = download_coco_dataset(args)
         
@@ -346,18 +346,19 @@ def main_worker(rank, world_size, args):
         dist.barrier()
         
     # Validate that we have at least training data for training or validation data for evaluation
+    # Only after potential download has completed
     if not args.only_evaluate and (not args.train_images or not args.train_annotations):
-        print("Error: Training images and annotations are required for training.")
-        print("       Use --download_train_data to download COCO training data")
-        print("       or provide --train_images and --train_annotations paths.")
+        print(f"Process {rank}: Error: Training images and annotations are required for training.")
+        print(f"Process {rank}:        Use --download_train_data to download COCO training data")
+        print(f"Process {rank}:        or provide --train_images and --train_annotations paths.")
         return
         
     if args.only_evaluate and not (args.val_images and args.val_annotations) and not args.testdev_images:
-        print("Error: Validation or test-dev images are required for evaluation.")
-        print("       Use --download_val_data to download COCO validation data")
-        print("       or provide --val_images and --val_annotations paths.")
-        print("       Alternatively, use --download_test_data to download test-dev data")
-        print("       or provide --testdev_images path.")
+        print(f"Process {rank}: Error: Validation or test-dev images are required for evaluation.")
+        print(f"Process {rank}:        Use --download_val_data to download COCO validation data")
+        print(f"Process {rank}:        or provide --val_images and --val_annotations paths.")
+        print(f"Process {rank}:        Alternatively, use --download_test_data to download test-dev data")
+        print(f"Process {rank}:        or provide --testdev_images path.")
         return
     
     # Define transforms for input images (resize and convert to tensor)
@@ -786,7 +787,11 @@ def main():
     
     # For non-distributed mode, run normally
     if not args.distributed:
-        # Validate data paths for the single-process run
+        # Download dataset first if requested (for non-distributed mode)
+        if args.download_train_data or args.download_val_data or args.download_test_data:
+            args = download_coco_dataset(args)
+        
+        # Then validate data paths after potential download
         if not args.only_evaluate and (not args.train_images or not args.train_annotations):
             print("Error: Training images and annotations are required for training.")
             print("       Use --download_train_data to download COCO training data")
@@ -800,10 +805,6 @@ def main():
             print("       Alternatively, use --download_test_data to download test-dev data")
             print("       or provide --testdev_images path.")
             return
-        
-        # Download dataset if requested (for non-distributed mode)
-        if args.download_train_data or args.download_val_data or args.download_test_data:
-            args = download_coco_dataset(args)
         
         # Run main worker function with rank 0
         main_worker(0, 1, args)
