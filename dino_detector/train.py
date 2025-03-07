@@ -25,7 +25,8 @@ from dino_detector.config import (
     gradient_clip_val,
     set_cost_class, set_cost_bbox, set_cost_giou, focal_alpha, focal_gamma,
     loss_weights, num_classes,
-    debug_mode, debug_dataset_size, debug_epochs, debug_learning_rate
+    debug_mode, debug_dataset_size, debug_epochs, debug_learning_rate,
+    use_deformable, n_points, dim_feedforward, dropout
 )
 from torchvision import transforms
 import matplotlib.pyplot as plt
@@ -762,6 +763,12 @@ def main():
                        help='Number of samples to use in debug/overfit mode')
     parser.add_argument('--debug_lr', type=float, default=debug_learning_rate,
                        help='Learning rate to use in debug/overfit mode')
+                       
+    # Model architecture options
+    parser.add_argument('--use_deformable', type=bool, default=use_deformable,
+                       help='Use deformable attention in the decoder')
+    parser.add_argument('--n_points', type=int, default=n_points,
+                       help='Number of sampling points in deformable attention')
                        
     # Loss and matcher options
     parser.add_argument('--set_cost_class', type=float, default=set_cost_class,

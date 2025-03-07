@@ -14,13 +14,17 @@ class DINOv2ObjectDetector(nn.Module):
             lora_r=config.lora_r, 
             lora_alpha=config.lora_alpha
         )
-        # Initialize the DETR-style decoder
+        # Initialize the decoder with optional deformable attention
         self.decoder = DETRDecoder(
             num_queries=config.num_queries,
             hidden_dim=config.hidden_dim,
             nheads=config.nheads,
             num_decoder_layers=config.num_decoder_layers,
-            num_classes=config.num_classes
+            num_classes=config.num_classes,
+            dim_feedforward=config.dim_feedforward,
+            dropout=config.dropout,
+            n_points=config.n_points,
+            use_deformable=config.use_deformable
         )
 
     def forward(self, pixel_values):

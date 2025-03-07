@@ -26,6 +26,13 @@ num_queries = 100   # Number of learned object queries for the decoder
 num_decoder_layers = 6
 nheads = 8
 num_classes = 91    # For example, COCO has 91 classes
+dim_feedforward = 2048  # Dimension of the feedforward network in transformer
+dropout = 0.1       # Dropout rate in transformer layers
+
+# Deformable attention parameters
+use_deformable = True  # Whether to use deformable attention in decoder
+n_points = 4        # Number of sampling points per attention head per query
+deformable_modulation = True  # Whether to modulate attention weights in deformable attention
 
 # Training and optimizer settings
 weight_decay = 1e-4
