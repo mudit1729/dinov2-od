@@ -27,7 +27,29 @@ pip install -e .
 
 ## Usage
 
-### Training
+### Downloading COCO Dataset
+
+We provide a script to automatically download the COCO dataset and run training:
+
+```bash
+# Download training data and run training
+python download_coco.py --download_train --train --output_dir outputs
+
+# Download both training and validation data
+python download_coco.py --download_train --download_val --train --output_dir outputs
+
+# Download test data for evaluation
+python download_coco.py --download_test --output_dir test_outputs
+
+# Resume from checkpoint after downloading data
+python download_coco.py --download_train --download_val --train --checkpoint outputs/dino_detector_epoch_20.pth
+```
+
+This script will download the specified parts of the COCO dataset, extract them, and optionally run training with the correct paths. See `python download_coco.py --help` for more options.
+
+### Training Manually
+
+If you already have the COCO dataset downloaded, you can run training directly:
 
 ```bash
 python -m dino_detector.train \
