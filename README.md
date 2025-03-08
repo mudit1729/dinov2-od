@@ -19,10 +19,10 @@ git clone https://github.com/mudit1729/dinov2-od.git
 cd dinov2-od
 
 # Install dependencies
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 # Install the package in development mode
-pip install -e .
+python3 -m pip install -e .
 ```
 
 ## Usage
@@ -33,36 +33,36 @@ You can download the COCO dataset and train in a single step using the integrate
 
 ```bash
 # Download COCO training data and train
-python -m dino_detector.train --download_train_data --output_dir outputs
+python3 -m dino_detector.train --download_train_data --output_dir outputs
 
 # Download both training and validation data
-python -m dino_detector.train --download_train_data --download_val_data --output_dir outputs
+python3 -m dino_detector.train --download_train_data --download_val_data --output_dir outputs
 
 # Resume from checkpoint after downloading data
-python -m dino_detector.train --download_train_data --checkpoint outputs/dino_detector_epoch_20.pth
+python3 -m dino_detector.train --download_train_data --checkpoint outputs/dino_detector_epoch_20.pth
 ```
 
 For evaluation with downloaded data:
 
 ```bash
 # Download validation data and evaluate a trained model
-python -m dino_detector.train --download_val_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
+python3 -m dino_detector.train --download_val_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
 
 # Download test-dev data and evaluate
-python -m dino_detector.train --download_test_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
+python3 -m dino_detector.train --download_test_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
 ```
 
 We also provide a standalone script to just download the COCO dataset:
 
 ```bash
 # Just download training data
-python download_coco.py --download_train
+python3 download_coco.py --download_train
 
 # Download both training and validation data
-python download_coco.py --download_train --download_val 
+python3 download_coco.py --download_train --download_val 
 
 # Download test data
-python download_coco.py --download_test
+python3 download_coco.py --download_test
 ```
 
 ### Training Manually
@@ -70,7 +70,7 @@ python download_coco.py --download_test
 If you already have the COCO dataset downloaded, you can run training directly:
 
 ```bash
-python -m dino_detector.train \
+python3 -m dino_detector.train \
   --train_images path/to/coco/train2017 \
   --train_annotations path/to/coco/annotations/instances_train2017.json \
   --val_images path/to/coco/val2017 \
@@ -81,7 +81,7 @@ python -m dino_detector.train \
 ### Resuming Training from Checkpoint
 
 ```bash
-python -m dino_detector.train \
+python3 -m dino_detector.train \
   --train_images path/to/coco/train2017 \
   --train_annotations path/to/coco/annotations/instances_train2017.json \
   --val_images path/to/coco/val2017 \
@@ -93,7 +93,7 @@ python -m dino_detector.train \
 ### Evaluation Only
 
 ```bash
-python -m dino_detector.train \
+python3 -m dino_detector.train \
   --val_images path/to/coco/val2017 \
   --val_annotations path/to/coco/annotations/instances_val2017.json \
   --output_dir eval_outputs \
@@ -104,7 +104,7 @@ python -m dino_detector.train \
 ### Test-Dev Evaluation
 
 ```bash
-python -m dino_detector.train \
+python3 -m dino_detector.train \
   --testdev_images path/to/coco/test2017 \
   --output_dir test_outputs \
   --checkpoint outputs/dino_detector_final.pth \
@@ -117,13 +117,13 @@ The debug/overfit mode allows training on a small subset of data to verify model
 
 ```bash
 # Run training in debug mode with default settings (32 samples)
-python -m dino_detector.train --debug --download_train_data
+python3 -m dino_detector.train --debug --download_train_data
 
 # Customize the number of samples and learning rate
-python -m dino_detector.train --debug --debug_samples 64 --debug_lr 5e-4
+python3 -m dino_detector.train --debug --debug_samples 64 --debug_lr 5e-4
 
 # Use specific data with debug mode
-python -m dino_detector.train \
+python3 -m dino_detector.train \
   --debug \
   --train_images path/to/coco/train2017 \
   --train_annotations path/to/coco/annotations/instances_train2017.json

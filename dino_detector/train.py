@@ -87,7 +87,7 @@ def create_criterion(args):
     # Create the criterion
     criterion = SetCriterion(
         matcher=matcher,
-        num_classes=num_classes,
+        num_classes=args.num_classes,
         weight_dict=loss_weights,
         focal_alpha=focal_alpha,
         focal_gamma=focal_gamma
@@ -409,12 +409,15 @@ def main_worker(rank, world_size, args):
     ])
 
     # Initialize device
-    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    if args.device == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
     print(f"Process {rank}: Using device: {device}")
     
     # Initialize detector model
     print(f"Process {rank}: Initializing DINOv2 Object Detector...")
-    model = DINOv2ObjectDetector()
+    model = DINOv2ObjectDetector(num_classes=args.num_classes)
     model = model.to(device)
     
     # Create the criterion for loss computation
@@ -471,7 +474,7 @@ def main_worker(rank, world_size, args):
                 test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
                 test_dataloader = DataLoader(
                     test_dataset, 
-                    batch_size=batch_size,
+                    batch_size=args.batch_size,
                     sampler=test_sampler,
                     num_workers=num_workers,
                     collate_fn=collate_fn
@@ -479,7 +482,7 @@ def main_worker(rank, world_size, args):
             else:
                 test_dataloader = DataLoader(
                     test_dataset, 
-                    batch_size=batch_size,
+                    batch_size=args.batch_size,
                     shuffle=False,
                     num_workers=num_workers,
                     collate_fn=collate_fn
@@ -502,7 +505,7 @@ def main_worker(rank, world_size, args):
                 val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
                 val_dataloader = DataLoader(
                     val_dataset,
-                    batch_size=batch_size,
+                    batch_size=args.batch_size,
                     sampler=val_sampler,
                     num_workers=num_workers,
                     collate_fn=collate_fn
@@ -510,7 +513,7 @@ def main_worker(rank, world_size, args):
             else:
                 val_dataloader = DataLoader(
                     val_dataset,
-                    batch_size=batch_size,
+                    batch_size=args.batch_size,
                     shuffle=False,
                     num_workers=num_workers,
                     collate_fn=collate_fn
@@ -542,7 +545,7 @@ def main_worker(rank, world_size, args):
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=batch_size, 
+            batch_size=args.batch_size, 
             sampler=train_sampler, 
             num_workers=num_workers,
             collate_fn=collate_fn
@@ -550,7 +553,7 @@ def main_worker(rank, world_size, args):
     else:
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=batch_size, 
+            batch_size=args.batch_size, 
             shuffle=True, 
             num_workers=num_workers,
             collate_fn=collate_fn
@@ -569,7 +572,7 @@ def main_worker(rank, world_size, args):
         # This helps with overfitting verification
         if args.debug:
             original_val_size = len(val_dataset)
-            val_dataset = create_debug_subset(val_dataset, args.debug_samples)
+            val_dataset = create_debug_subset(val_dataset, args.debug_samples * 2)  # Increase validation samples
             print(f"Process {rank}: DEBUG MODE - Using {len(val_dataset)} validation samples out of {original_val_size}")
         
         # Use DistributedSampler for distributed evaluation
@@ -577,7 +580,7 @@ def main_worker(rank, world_size, args):
             val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
             val_dataloader = DataLoader(
                 val_dataset,
-                batch_size=batch_size,
+                batch_size=args.batch_size,
                 sampler=val_sampler,
                 num_workers=num_workers,
                 collate_fn=collate_fn
@@ -585,7 +588,7 @@ def main_worker(rank, world_size, args):
         else:
             val_dataloader = DataLoader(
                 val_dataset,
-                batch_size=batch_size,
+                batch_size=args.batch_size,
                 shuffle=False,
                 num_workers=num_workers,
                 collate_fn=collate_fn
@@ -739,7 +742,7 @@ def main_worker(rank, world_size, args):
         # Use non-distributed dataloader for final evaluation on rank 0
         test_dataloader = DataLoader(
             test_dataset, 
-            batch_size=batch_size,
+            batch_size=args.batch_size,
             shuffle=False,
             num_workers=num_workers,
             collate_fn=collate_fn
@@ -803,6 +806,8 @@ def main():
                        help='Enable debug/overfitting mode on a small subset of data')
     parser.add_argument('--debug_samples', type=int, default=debug_dataset_size,
                        help='Number of samples to use in debug/overfit mode')
+    parser.add_argument('--batch_size', type=int, default=batch_size,
+                       help='Batch size for training')
     parser.add_argument('--debug_lr', type=float, default=debug_learning_rate,
                        help='Learning rate to use in debug/overfit mode')
                        
@@ -823,6 +828,10 @@ def main():
                        help='Alpha parameter for focal loss')
     parser.add_argument('--focal_gamma', type=float, default=focal_gamma,
                        help='Gamma parameter for focal loss')
+    parser.add_argument('--device', type=str, default="cuda",
+                       help='Device to use (cuda or cpu)')
+    parser.add_argument('--num_classes', type=int, default=num_classes,
+                       help='Number of classes for detection')
     
     args = parser.parse_args()
     

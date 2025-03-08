@@ -6,7 +6,7 @@ from .detr_decoder import DETRDecoder
 from .. import config
 
 class DINOv2ObjectDetector(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=config.num_classes):
         super().__init__()
         # Initialize the frozen DINOv2 backbone with LoRA
         self.backbone = DINOv2Backbone(
@@ -20,7 +20,7 @@ class DINOv2ObjectDetector(nn.Module):
             hidden_dim=config.hidden_dim,
             nheads=config.nheads,
             num_decoder_layers=config.num_decoder_layers,
-            num_classes=config.num_classes,
+            num_classes=num_classes,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
             n_points=config.n_points,

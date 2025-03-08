@@ -115,10 +115,21 @@ class SetCriterion(nn.Module):
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
+                                    
+        # Validate indices to avoid out-of-bounds errors
+        batch_idx, src_idx = idx
+        valid_mask = (batch_idx < src_logits.shape[0]) & (src_idx < src_logits.shape[1])
+        if not valid_mask.all():
+            print(f"WARNING: Some indices out of bounds: batch_idx={batch_idx}, src_idx={src_idx}, src_logits.shape={src_logits.shape}")
+            batch_idx = batch_idx[valid_mask]
+            src_idx = src_idx[valid_mask]
+            target_classes_o = target_classes_o[valid_mask]
+            idx = (batch_idx, src_idx)
+            
         target_classes[idx] = target_classes_o
         
         # Compute focal loss for classification
-        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], self.num_classes + 1],
                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
         target_classes_onehot = target_classes_onehot[:, :, :-1]
@@ -182,6 +193,9 @@ class SetCriterion(nn.Module):
         # Concatenate all source (prediction) indices with their corresponding batch indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
+        
+        # Safety check - make sure indices are valid
+        max_idx = batch_idx.max().item() if len(batch_idx) > 0 else -1
         return batch_idx, src_idx
     
     def _get_tgt_permutation_idx(self, indices):

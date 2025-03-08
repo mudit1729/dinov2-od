@@ -97,12 +97,25 @@ class HungarianMatcher(nn.Module):
             # Final cost matrix = weighted sum of all costs
             C = self.cost_class * cost_class + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
             
+            # Take only first num_queries predictions for matching
+            # This ensures we only consider valid indices
+            C_valid = C[:num_queries]
+            
             # Hungarian algorithm to find optimal assignment (minimize cost)
-            indices_i, indices_j = linear_sum_assignment(C.cpu().numpy())
-            indices.append((
-                torch.as_tensor(indices_i, dtype=torch.int64),
-                torch.as_tensor(indices_j, dtype=torch.int64)
-            ))
+            indices_i, indices_j = linear_sum_assignment(C_valid.cpu().numpy())
+            
+            # Convert to tensors and ensure indices_i are within valid range (num_queries)
+            indices_i = torch.as_tensor(indices_i, dtype=torch.int64)
+            indices_j = torch.as_tensor(indices_j, dtype=torch.int64)
+            
+            # Filter out invalid prediction indices
+            valid_mask = indices_i < num_queries
+            if not valid_mask.all():
+                print(f"WARNING: Some prediction indices are out of range: max={indices_i.max()}, num_queries={num_queries}")
+                indices_i = indices_i[valid_mask]
+                indices_j = indices_j[valid_mask]
+                
+            indices.append((indices_i, indices_j))
         
         # Return batch indices, prediction indices, and GT indices
         return [(torch.as_tensor(i, dtype=torch.int64), 
