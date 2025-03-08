@@ -14,6 +14,8 @@ import sys
 import urllib.request
 import zipfile
 from tqdm import tqdm
+import gc
+from dino_detector.validate import print_tensors_by_size, clear_memory, memory_stats
 from dino_detector.models.detector import DINOv2ObjectDetector
 from dino_detector.dataset import COCODataset, COCOTestDataset, collate_fn
 from dino_detector.utils import evaluate_coco, compute_coco_metrics
@@ -490,6 +492,13 @@ def main_worker(rank, world_size, args):
             
             print(f"Process {rank}: Test dataset loaded with {len(test_dataset)} images")
             
+            # Memory tracking before evaluation
+            if torch.cuda.is_available() and device.type == 'cuda':
+                print(f"Before Evaluation - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                      f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
+                torch.cuda.empty_cache()  # Try to free some memory
+                print(f"After Empty Cache - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated)")
+            
             # Generate predictions for test-dev
             test_results_file = os.path.join(args.output_dir, f"testdev_predictions_rank{rank}.json")
             model.eval()
@@ -632,6 +641,12 @@ def main_worker(rank, world_size, args):
         model.train()
         running_loss = 0.0
         
+        # Memory tracking at the start of epoch
+        if torch.cuda.is_available() and device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(device)
+            print(f"Epoch {epoch+1} Start - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                  f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
+        
         if rank == 0:  # Only rank 0 shows progress bar
             pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             iterator = pbar
@@ -652,9 +667,17 @@ def main_worker(rank, world_size, args):
             # Forward pass
             outputs = model(images)
             
+            # Debug memory before loss calculation
+            if batch_idx % 5 == 0 and torch.cuda.is_available() and device.type == 'cuda':
+                print(f"Before loss - {memory_stats(device)}")
+            
             # Compute loss using criterion with Hungarian matching
             loss_dict = criterion(outputs, targets)
             loss = sum(loss_dict.values())
+            
+            # Debug memory after loss calculation
+            if batch_idx % 5 == 0 and torch.cuda.is_available() and device.type == 'cuda':
+                print(f"After loss - {memory_stats(device)}")
             
             # Backward pass and optimize with gradient accumulation
             loss = loss / gradient_accumulation_steps
@@ -668,9 +691,25 @@ def main_worker(rank, world_size, args):
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+                
+                # Clear memory every few iterations
+                if batch_idx % 10 == 0 and torch.cuda.is_available() and device.type == 'cuda':
+                    # Try to clean up memory
+                    clear_memory(model)
+                    print(f"After memory cleanup - {memory_stats(device)}")
+                    
+                    # If memory usage is excessive, print tensor sizes
+                    if torch.cuda.memory_allocated(device) > 4 * 1024 * 1024 * 1024:  # 4GB
+                        print_tensors_by_size()
             
             # Update statistics
             running_loss += loss.item()
+            
+            # Track memory after each batch
+            if batch_idx % 5 == 0 and torch.cuda.is_available() and device.type == 'cuda':
+                print(f"Batch {batch_idx} - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                      f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
+                
             if rank == 0:
                 # Display individual loss components
                 loss_str = f"total: {loss.item():.3f} "
@@ -690,6 +729,13 @@ def main_worker(rank, world_size, args):
         if rank == 0:
             print(f"Epoch {epoch+1}/{num_epochs} - Loss: {epoch_loss:.4f}")
             
+            # Memory tracking at the end of epoch
+            if torch.cuda.is_available() and device.type == 'cuda':
+                print(f"Epoch {epoch+1} End - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                      f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
+                # Report peak memory usage
+                print(f"Epoch {epoch+1} Peak CUDA Memory: {torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB")
+            
             # Update metrics history
             metrics_history['epochs'].append(epoch + 1)
             metrics_history['train_loss'].append(epoch_loss)
@@ -700,6 +746,13 @@ def main_worker(rank, world_size, args):
             
             # Only rank 0 runs validation and reports metrics
             if rank == 0:
+                # Memory tracking before validation
+                if torch.cuda.is_available() and device.type == 'cuda':
+                    print(f"Before Validation - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                          f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
+                    torch.cuda.empty_cache()  # Try to free some memory
+                    print(f"After Empty Cache - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated)")
+                
                 metrics = validate(model, val_dataloader, device, epoch + 1, args.output_dir)
                 
                 if metrics:
@@ -711,6 +764,11 @@ def main_worker(rank, world_size, args):
                     
                 # Plot metrics
                 plot_metrics(metrics_history, args.output_dir)
+                
+                # Memory tracking after validation
+                if torch.cuda.is_available() and device.type == 'cuda':
+                    print(f"After Validation - CUDA Memory: {torch.cuda.memory_allocated(device)/1024**2:.2f}MB (allocated), "
+                          f"{torch.cuda.max_memory_allocated(device)/1024**2:.2f}MB (max allocated)")
             
             # Wait for validation to finish before continuing training
             if args.distributed:
