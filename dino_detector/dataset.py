@@ -17,6 +17,9 @@ class COCODataset(Dataset):
         with open(annotation_file, 'r') as f:
             self.coco = json.load(f)
         self.images_dir = images_dir
+        # Store the annotation file path for evaluation
+        self.coco_path = annotation_file
+        
         # Build an index for image id -> file name and annotations
         self.images = {img['id']: img for img in self.coco['images']}
         self.annotations = {}
@@ -27,6 +30,9 @@ class COCODataset(Dataset):
             self.annotations[img_id].append(ann)
         self.image_ids = list(self.images.keys())
         self.transform = transform
+        
+        # Get category information for class labels
+        self.categories = {cat['id']: idx for idx, cat in enumerate(self.coco['categories'])}
 
     def __len__(self):
         return len(self.image_ids)
@@ -48,16 +54,61 @@ class COCODataset(Dataset):
         img_path = os.path.join(self.images_dir, img_info['file_name'])
         image = Image.open(img_path).convert("RGB")
         
-        # Process annotations for current image
-        target = {
-            'image_id': img_id,
-            'annotations': self.annotations.get(img_id, []),
-            'orig_size': torch.as_tensor([img_info.get('height', 0), img_info.get('width', 0)]),
-            'filename': img_info['file_name']
-        }
+        # Get original image dimensions
+        width, height = image.size if hasattr(image, 'size') else (
+            img_info.get('width', 0), img_info.get('height', 0))
         
+        # Apply transforms first to get target image size
         if self.transform is not None:
             image = self.transform(image)
+        
+        # Get target image dimensions (after transforms)
+        img_h, img_w = image.shape[-2:]  # Assuming image is tensor [C, H, W]
+            
+        # Process annotations for current image
+        anns = self.annotations.get(img_id, [])
+        
+        # Extract bounding boxes and labels in the format expected by the matcher
+        boxes = []
+        labels = []
+        for ann in anns:
+            if 'bbox' in ann and ann.get('iscrowd', 0) == 0:
+                # COCO bbox is [x, y, width, height] in absolute coordinates
+                x, y, w, h = ann['bbox']
+                
+                # Skip invalid boxes
+                if w <= 0 or h <= 0:
+                    continue
+                
+                # Convert to [center_x, center_y, width, height] and normalize
+                cx = (x + w / 2) / width
+                cy = (y + h / 2) / height
+                nw = w / width
+                nh = h / height
+                    
+                # Skip boxes that are too small or outside the image
+                if nw < 0.001 or nh < 0.001 or cx <= 0 or cy <= 0 or cx >= 1 or cy >= 1:
+                    continue
+                
+                # Add to the list
+                boxes.append([cx, cy, nw, nh])
+                
+                # Get category and convert to zero-indexed label
+                category_id = ann['category_id']
+                label = self.categories.get(category_id, 0)  # Default to 0 if not found
+                labels.append(label)
+        
+        # Format target dictionary with expected keys for the matcher
+        target = {
+            'image_id': img_id,
+            'orig_size': torch.as_tensor([height, width]),
+            'size': torch.as_tensor([img_h, img_w]),
+            'filename': img_info['file_name'],
+            'boxes': torch.as_tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4)),
+            'labels': torch.as_tensor(labels, dtype=torch.int64) if labels else torch.zeros((0,), dtype=torch.int64),
+            'area': torch.as_tensor([ann.get('area', 0) for ann in anns if 'bbox' in ann and ann.get('iscrowd', 0) == 0]),
+            'iscrowd': torch.as_tensor([ann.get('iscrowd', 0) for ann in anns if 'bbox' in ann])
+        }
             
         return image, target
         
@@ -75,13 +126,20 @@ class COCOTestDataset(Dataset):
         """
         self.images_dir = images_dir
         self.transform = transform
+        self.coco_path = annotation_file if annotation_file and os.path.exists(annotation_file) else None
         
         # If annotation file is provided, load it (useful for validation)
-        if annotation_file and os.path.exists(annotation_file):
-            with open(annotation_file, 'r') as f:
+        if self.coco_path:
+            with open(self.coco_path, 'r') as f:
                 self.coco = json.load(f)
             self.images = {img['id']: img for img in self.coco['images']}
             self.image_ids = list(self.images.keys())
+            
+            # Get category information if available
+            if 'categories' in self.coco:
+                self.categories = {cat['id']: idx for idx, cat in enumerate(self.coco['categories'])}
+            else:
+                self.categories = {}
         else:
             # No annotations - just list all image files
             self.image_files = [f for f in os.listdir(images_dir) 
@@ -89,6 +147,7 @@ class COCOTestDataset(Dataset):
             self.image_ids = [int(os.path.splitext(f)[0]) for f in self.image_files]
             self.images = {img_id: {'file_name': f, 'id': img_id} 
                           for img_id, f in zip(self.image_ids, self.image_files)}
+            self.categories = {}
 
     def __len__(self):
         return len(self.image_ids)
@@ -110,18 +169,26 @@ class COCOTestDataset(Dataset):
         img_path = os.path.join(self.images_dir, img_info['file_name'])
         image = Image.open(img_path).convert("RGB")
         
-        # Get original image size
+        # Get original image dimensions
         width, height = image.size
         
-        # Create minimal target information
+        # Apply transforms to get target image size
+        if self.transform is not None:
+            image = self.transform(image)
+            
+        # Get target image dimensions
+        img_h, img_w = image.shape[-2:]  # Assuming image is tensor [C, H, W]
+        
+        # Create target information with properly formatted keys for the matcher
+        # For test dataset, provide empty boxes and labels since we don't have annotations
         target = {
             'image_id': img_id,
             'orig_size': torch.as_tensor([height, width]),
-            'filename': img_info['file_name']
+            'size': torch.as_tensor([img_h, img_w]),
+            'filename': img_info['file_name'],
+            'boxes': torch.zeros((0, 4)),  # Empty tensor for boxes
+            'labels': torch.zeros((0,), dtype=torch.int64),  # Empty tensor for labels
         }
-        
-        if self.transform is not None:
-            image = self.transform(image)
             
         return image, target
 def collate_fn(batch):
