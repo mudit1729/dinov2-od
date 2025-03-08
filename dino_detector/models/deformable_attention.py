@@ -58,13 +58,28 @@ class DeformableAttention(nn.Module):
             query: [batch_size, num_queries, d_model]
             reference_points: [batch_size, num_queries, 2] normalized reference points (x, y)
             input_flatten: [batch_size, h*w, d_model] flattened feature maps
-            input_spatial_shapes: [h, w] spatial shapes of feature maps
+            input_spatial_shapes: [h, w] or (h, w) - spatial shapes of feature maps
             
         Returns:
             output: [batch_size, num_queries, d_model]
         """
         batch_size, num_queries, _ = query.shape
-        h, w = input_spatial_shapes
+        batch_size_mem, hw, d_model = input_flatten.shape
+        
+        # Extract spatial dimensions
+        if isinstance(input_spatial_shapes, tuple):
+            h, w = input_spatial_shapes
+        else:
+            h, w = input_spatial_shapes
+            
+        # Verify that h*w matches the second dimension of input_flatten
+        if h * w != hw:
+            # Try to infer the spatial dimensions from flattened input
+            spatial_size = int(hw ** 0.5)
+            if spatial_size ** 2 != hw:
+                raise ValueError(f"Cannot reshape input of size {hw} into a square feature map")
+            h = w = spatial_size
+            print(f"Warning: Inferring spatial dimensions as ({h}, {w})")
         
         # Calculate sampling offsets for each query
         # Shape: [batch_size, num_queries, n_heads, n_points, 2]
@@ -113,26 +128,31 @@ class DeformableAttention(nn.Module):
         wy1 = (sampling_locations_y - y0.float())
         wy0 = 1.0 - wy1
         
-        # Reshape values for bilinear sampling
-        # Shape: [batch_size, h, w, d_model]
-        values = values.view(batch_size, h, w, self.d_model)
-        
-        # Perform bilinear sampling
-        # Shape: [batch_size, num_queries, n_heads, n_points, d_model/n_heads]
+        # Reshape values for easier indexing and to extract per-head features
         d_head = self.d_model // self.n_heads
-        values_per_head = values.view(batch_size, h, w, self.n_heads, d_head)
         
-        # Initialize result tensor
+        # Reshape to make indexing simpler
+        values_2d = values.view(batch_size, -1, self.d_model)  # Ensure we have a flat representation
+        values_heads = values_2d.view(batch_size, hw, self.n_heads, d_head)
+        
+        # Compute linear indices for the 2D grid
+        indices = y0 * w + x0  # Shape: [batch_size, num_queries, n_heads, n_points]
+        
+        # Initialize result tensor for bilinear interpolation
         result = torch.zeros(batch_size, num_queries, self.n_heads, 
-                           self.n_points, d_head, device=query.device)
-        
-        # Sample values using bilinear interpolation
+                            self.n_points, d_head, device=query.device)
+                            
+        # Perform bilinear interpolation with flat indexing
+        # For each sample point, calculate weighted sum of 4 corner values
         for b in range(batch_size):
             for q in range(num_queries):
                 for h_idx in range(self.n_heads):
                     for p in range(self.n_points):
-                        x0_idx, y0_idx = x0[b, q, h_idx, p], y0[b, q, h_idx, p]
-                        x1_idx, y1_idx = x1[b, q, h_idx, p], y1[b, q, h_idx, p]
+                        # Get indices for the 4 corners
+                        idx00 = (y0[b, q, h_idx, p] * w + x0[b, q, h_idx, p]).item()
+                        idx01 = (y1[b, q, h_idx, p] * w + x0[b, q, h_idx, p]).item()
+                        idx10 = (y0[b, q, h_idx, p] * w + x1[b, q, h_idx, p]).item()
+                        idx11 = (y1[b, q, h_idx, p] * w + x1[b, q, h_idx, p]).item()
                         
                         # Get interpolation weights
                         w00 = wx0[b, q, h_idx, p] * wy0[b, q, h_idx, p]
@@ -140,13 +160,14 @@ class DeformableAttention(nn.Module):
                         w10 = wx1[b, q, h_idx, p] * wy0[b, q, h_idx, p]
                         w11 = wx1[b, q, h_idx, p] * wy1[b, q, h_idx, p]
                         
-                        # Perform bilinear interpolation
-                        result[b, q, h_idx, p] = (
-                            values_per_head[b, y0_idx, x0_idx, h_idx] * w00 +
-                            values_per_head[b, y1_idx, x0_idx, h_idx] * w01 +
-                            values_per_head[b, y0_idx, x1_idx, h_idx] * w10 +
-                            values_per_head[b, y1_idx, x1_idx, h_idx] * w11
-                        )
+                        # Perform bilinear interpolation 
+                        if idx00 < hw and idx01 < hw and idx10 < hw and idx11 < hw:
+                            result[b, q, h_idx, p] = (
+                                values_heads[b, idx00, h_idx] * w00 +
+                                values_heads[b, idx01, h_idx] * w01 +
+                                values_heads[b, idx10, h_idx] * w10 +
+                                values_heads[b, idx11, h_idx] * w11
+                            )
         
         # Apply attention weights
         # Shape: [batch_size, num_queries, n_heads, d_head]
@@ -156,7 +177,7 @@ class DeformableAttention(nn.Module):
         # Shape: [batch_size, num_queries, d_model]
         output = output.view(batch_size, num_queries, self.d_model)
         
-        # Project output
+        # Final projection
         output = self.output_proj(output)
         
         return output
@@ -205,6 +226,9 @@ class DeformableDecoderLayer(nn.Module):
             Output tensor [batch_size, num_queries, d_model]
         """
         # Self-attention
+        batch_size, num_queries, _ = tgt.shape
+        
+        # Handle self-attention with proper transpose for multi-head attention
         q = k = v = tgt.transpose(0, 1)  # [num_queries, batch_size, d_model]
         tgt2 = self.self_attn(q, k, v, attn_mask=tgt_mask)[0]
         tgt = tgt + self.dropout1(tgt2.transpose(0, 1))
@@ -213,10 +237,24 @@ class DeformableDecoderLayer(nn.Module):
         # Calculate reference points from queries
         reference_points = self.reference_points_proj(tgt).sigmoid()  # [batch_size, num_queries, 2]
         
-        # Spatial shapes of the feature map
-        batch_size, hw, d_model = memory.shape
-        h = w = int(hw ** 0.5)  # Assuming square feature maps
+        # Determine feature map spatial dimensions
+        batch_size_mem, hw, d_model_mem = memory.shape
         
+        # Try to find the most appropriate square dimension for the flattened features
+        spatial_size = int(hw ** 0.5)
+        if spatial_size ** 2 != hw:
+            # If not a perfect square, find the closest factors
+            for i in range(spatial_size, 0, -1):
+                if hw % i == 0:
+                    h, w = i, hw // i
+                    break
+            else:
+                # Fallback if no factors found
+                h = w = spatial_size  # This will be approximate
+                print(f"Warning: Could not factor {hw} exactly, using approximate dimensions ({h}, {w})")
+        else:
+            h = w = spatial_size
+            
         # Deformable cross-attention
         tgt2 = self.cross_attn(tgt, reference_points, memory, (h, w))
         tgt = tgt + self.dropout2(tgt2)
@@ -256,7 +294,8 @@ class DeformableTransformerDecoder(nn.Module):
             memory_mask: Mask for memory tensor
             
         Returns:
-            Output tensor [batch_size, num_queries, d_model]
+            output: Final output tensor [batch_size, num_queries, d_model]
+            intermediate: List of intermediate outputs if return_intermediate is True
         """
         output = tgt
         intermediate = []
@@ -265,4 +304,6 @@ class DeformableTransformerDecoder(nn.Module):
             output = layer(output, memory, tgt_mask, memory_mask)
             intermediate.append(output)
         
+        # For compatibility with DETR decoder, we return the final output and intermediate outputs
+        # In our implementation, we only use the final output
         return output, intermediate
