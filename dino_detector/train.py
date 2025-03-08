@@ -199,17 +199,22 @@ def download_file(url, destination, desc=None):
         
         urllib.request.urlretrieve(url, destination, reporthook=report_progress)
 
-def extract_archive(archive_path, extract_dir, desc=None):
+def extract_archive(archive_path, extract_dir, desc=None, debug_mode=False, max_samples=None):
     """
-    Extract an archive file.
+    Extract an archive file. In debug mode, limits the number of image files extracted.
     
     Args:
         archive_path: Path to the archive file
         extract_dir: Directory to extract to
         desc: Description for the progress bar
+        debug_mode: Whether to extract only a limited number of files (for debug mode)
+        max_samples: Maximum number of image files to extract in debug mode
     """
     if not desc:
         desc = f"Extracting {os.path.basename(archive_path)}"
+    
+    if debug_mode and max_samples is not None:
+        desc = f"{desc} (debug mode, max {max_samples} samples)"
     
     print(f"{desc}...")
     
@@ -219,9 +224,35 @@ def extract_archive(archive_path, extract_dir, desc=None):
     # Extract based on file extension
     if archive_path.endswith('.zip'):
         with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-            total_files = len(zip_ref.namelist())
+            # Get the list of files
+            file_list = zip_ref.namelist()
+            
+            # In debug mode, limit the number of image files
+            if debug_mode and max_samples is not None and 'images' in archive_path:
+                # Always extract directories
+                dirs = [f for f in file_list if f.endswith('/')]
+                
+                # Extract only a limited number of image files
+                image_files = [f for f in file_list if f.endswith('.jpg') and not f.endswith('/')]
+                if len(image_files) > max_samples:
+                    image_files = image_files[:max_samples]
+                
+                # Extract all non-image files (like annotations, metadata)
+                other_files = [f for f in file_list if not f.endswith('.jpg') and not f.endswith('/')]
+                
+                # Final list of files to extract
+                files_to_extract = dirs + image_files + other_files
+                print(f"Debug mode: Extracting {len(image_files)} images " +
+                      f"and {len(other_files)} other files")
+                
+                total_files = len(files_to_extract)
+            else:
+                files_to_extract = file_list
+                total_files = len(file_list)
+            
+            # Extract the files
             with tqdm(total=total_files, desc=desc) as pbar:
-                for file in zip_ref.namelist():
+                for file in files_to_extract:
                     zip_ref.extract(file, extract_dir)
                     pbar.update(1)
     else:
@@ -230,6 +261,7 @@ def extract_archive(archive_path, extract_dir, desc=None):
 def download_coco_dataset(args):
     """
     Download and extract COCO dataset based on command line arguments.
+    In debug mode, only extract a limited number of samples.
     
     Args:
         args: Command line arguments
@@ -264,6 +296,13 @@ def download_coco_dataset(args):
     if not download_parts:
         return args
     
+    # Check if in debug mode
+    is_debug_mode = getattr(args, 'debug', False)
+    max_samples = getattr(args, 'debug_samples', debug_dataset_size) if is_debug_mode else None
+    
+    if is_debug_mode:
+        print(f"Debug mode active: Will extract max {max_samples} samples for image archives")
+    
     # Download and extract the specified parts
     for part in download_parts:
         # Download
@@ -277,7 +316,9 @@ def download_coco_dataset(args):
         extract_archive(
             os.path.join(downloads_dir, f"{part}.zip"),
             data_dir,
-            f"Extracting {part}"
+            f"Extracting {part}",
+            debug_mode=is_debug_mode,
+            max_samples=max_samples
         )
     
     # Update paths in args if not provided
