@@ -6,3 +6,4 @@ Pillow
 tqdm
 pycocotools
 matplotlib
+tensorboard

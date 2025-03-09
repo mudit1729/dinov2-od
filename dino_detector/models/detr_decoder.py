@@ -35,8 +35,10 @@ class DETRDecoder(nn.Module):
             self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
         
         # Prediction heads: one for class scores and one for bounding boxes
+        # Reduce hidden_dim for MLP to reduce parameters
+        reduced_dim = hidden_dim // 2
         self.class_embed = nn.Linear(hidden_dim, num_classes)
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
+        self.bbox_embed = MLP(hidden_dim, reduced_dim, 4, num_layers=2)  # Reduced from 3 layers
         
         # Optional: additional reference points for deformable attention
         if use_deformable:

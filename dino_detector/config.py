@@ -19,20 +19,21 @@ find_unused_parameters = True  # For DDP, find unused parameters in the model
 
 # Model parameters
 dino_model_name = "facebook/dinov2-base"  # Pretrained DINOv2 from Hugging Face
-lora_r = 4          # Rank for LoRA adapter
+# Available models: facebook/dinov2-small, facebook/dinov2-base, facebook/dinov2-large, facebook/dinov2-giant
+lora_r = 2          # Rank for LoRA adapter (reduced from 4)
 lora_alpha = 1.0    # Scaling factor for LoRA updates
 hidden_dim = 768    # Hidden dimension (should match the DINOv2 model)
-num_queries = 100   # Number of learned object queries for the decoder
-num_decoder_layers = 6
+num_queries = 50    # Number of learned object queries for the decoder (reduced from 100)
+num_decoder_layers = 3  # Reduced from 6
 nheads = 8
 num_classes = 91    # For example, COCO has 91 classes
-dim_feedforward = 2048  # Dimension of the feedforward network in transformer
+dim_feedforward = 1024  # Dimension of the feedforward network in transformer (reduced from 2048)
 dropout = 0.1       # Dropout rate in transformer layers
 
 # Deformable attention parameters
 use_deformable = True  # Whether to use deformable attention in decoder
-n_points = 4        # Number of sampling points per attention head per query
-deformable_modulation = True  # Whether to modulate attention weights in deformable attention
+n_points = 2        # Number of sampling points per attention head per query (reduced from 4)
+deformable_modulation = False  # Disable modulation to reduce parameters
 
 # Training and optimizer settings
 weight_decay = 1e-4

@@ -5,7 +5,11 @@ import numpy as np
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 import json
+import os
+import logging
+import datetime
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 class MLP(nn.Module):
     """
@@ -270,3 +274,111 @@ def compute_coco_metrics(results, annotation_file):
     }
     
     return metrics
+
+
+def setup_logger(save_dir, log_file='train.log', level=logging.INFO):
+    """
+    Set up logger for training.
+    
+    Args:
+        save_dir: Directory to save log file
+        log_file: Name of the log file
+        level: Logging level
+        
+    Returns:
+        logger: Logger object
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Create timestamp for the log file
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f"{timestamp}_{log_file}"
+    log_path = os.path.join(save_dir, log_file)
+    
+    # Set up logger
+    logger = logging.getLogger('dino_detector')
+    logger.setLevel(level)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(console_handler)
+    
+    logger.info(f"Logging initialized: {log_path}")
+    return logger
+
+
+def setup_tensorboard(save_dir, experiment_name=None):
+    """
+    Set up TensorBoard writer.
+    
+    Args:
+        save_dir: Base directory to save TensorBoard logs
+        experiment_name: Optional name for the experiment
+        
+    Returns:
+        writer: TensorBoard SummaryWriter object
+    """
+    # Create timestamp for the log directory
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create log directory name
+    if experiment_name:
+        log_dir = os.path.join(save_dir, 'tensorboard', f"{timestamp}_{experiment_name}")
+    else:
+        log_dir = os.path.join(save_dir, 'tensorboard', timestamp)
+    
+    # Create TensorBoard writer
+    writer = SummaryWriter(log_dir=log_dir)
+    
+    print(f"TensorBoard logs will be saved to: {log_dir}")
+    return writer
+
+
+def log_metrics(writer, metrics, global_step, prefix=''):
+    """
+    Log metrics to TensorBoard.
+    
+    Args:
+        writer: TensorBoard SummaryWriter object
+        metrics: Dictionary of metrics to log
+        global_step: Global step (iteration or epoch)
+        prefix: Optional prefix for metric names
+    """
+    for metric_name, metric_value in metrics.items():
+        if isinstance(metric_value, torch.Tensor):
+            metric_value = metric_value.item()
+        writer.add_scalar(f"{prefix}{metric_name}", metric_value, global_step)
+
+
+def log_images(writer, images, targets=None, predictions=None, global_step=0, tag='images'):
+    """
+    Log images with optional bounding boxes to TensorBoard.
+    
+    Args:
+        writer: TensorBoard SummaryWriter object
+        images: Tensor of images [B, C, H, W]
+        targets: Optional ground truth targets
+        predictions: Optional model predictions
+        global_step: Global step (iteration or epoch)
+        tag: Tag for the images
+    """
+    if images.dim() == 4:  # Batch of images
+        max_images = min(images.size(0), 8)  # Log at most 8 images
+        images = images[:max_images]
+        
+        # Add images to TensorBoard
+        writer.add_images(tag, images, global_step)
+        
+        # TODO: Add visualization of bounding boxes if needed
+        # This would require converting the boxes to the format expected by TensorBoard
+        # and drawing them on the images
+    else:
+        # Single image
+        writer.add_image(tag, images, global_step)
