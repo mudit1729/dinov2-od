@@ -359,6 +359,37 @@ The model is evaluated using standard COCO evaluation metrics:
 - **APm**: Average Precision for medium objects
 - **APl**: Average Precision for large objects
 
+## Analyzing Results
+
+The repository includes a dedicated tool for analyzing detection results, generating visualizations, and creating performance reports:
+
+```bash
+# Analyze validation metrics
+python3 analyze_results.py --metrics_file outputs/val_metrics_epoch_10.json
+
+# Visualize predictions on test images
+python3 analyze_results.py \
+  --predictions_file outputs/testdev_predictions_final.json \
+  --test_images coco_data/test2017 \
+  --num_visualizations 10 \
+  --confidence_threshold 0.6
+
+# Run evaluation and generate analysis in one step
+python3 analyze_results.py \
+  --run_eval \
+  --model_path outputs/dino_detector_final.pth \
+  --val_images path/to/coco/val2017 \
+  --val_annotations path/to/coco/annotations/instances_val2017.json \
+  --output_dir analysis_outputs
+```
+
+The analyze_results.py script generates:
+- Detailed metrics tables and charts
+- Confidence score distributions
+- Class distribution analysis
+- Sample visualizations with bounding boxes
+- Summary reports for model performance
+
 ## Citation
 
 If this code is useful for your research, please consider citing:
