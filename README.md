@@ -1,6 +1,6 @@
 # DINOv2 Object Detection
 
-This repository implements an object detection model using Facebook's DINOv2 (Vision Transformer) as the backbone feature extractor. The detector follows a DETR-like architecture with a transformer decoder on top of DINOv2 features.
+This repository implements an object detection model using Facebook's DINOv2 (Vision Transformer) as the backbone feature extractor. The detector follows a DETR-like architecture with a transformer decoder on top of DINOv2 features, providing efficient object detection with minimal training resources.
 
 ## Features
 
@@ -25,6 +25,22 @@ python3 -m pip install -r requirements.txt
 
 # Install the package in development mode
 python3 -m pip install -e .
+```
+
+## Quick Start
+
+```bash
+# Clone and install
+git clone https://github.com/mudit1729/dinov2-od.git
+cd dinov2-od
+python3 -m pip install -r requirements.txt
+python3 -m pip install -e .
+
+# Train with auto-download (lightweight model, mini dataset)
+python3 -m dino_detector.train --download_train_data --lightweight --use_coco_mini --output_dir outputs
+
+# Evaluate model
+python3 -m dino_detector.train --download_val_data --only_evaluate --checkpoint outputs/dino_detector_final.pth
 ```
 
 ## Usage
@@ -268,17 +284,30 @@ python3 -m dino_detector.train \
   --train_annotations path/to/coco/annotations/instances_train2017.json \
   --lightweight
 
+# Combined with COCO mini dataset for even faster training
+python3 -m dino_detector.train \
+  --train_images path/to/coco/train2017 \
+  --train_annotations path/to/coco/annotations/instances_train2017.json \
+  --lightweight \
+  --use_coco_mini
+
 # Specify a different DINOv2 model variant
 python3 -m dino_detector.train \
   --train_images path/to/coco/train2017 \
   --train_annotations path/to/coco/annotations/instances_train2017.json \
   --dino_model facebook/dinov2-base \
   --lightweight
+```
 
-# Available DINOv2 model variants: facebook/dinov2-small, facebook/dinov2-base, facebook/dinov2-large, facebook/dinov2-giant
+Available DINOv2 model variants:
+- `facebook/dinov2-small` - 22M parameters (default for lightweight mode)
+- `facebook/dinov2-base` - 86M parameters
+- `facebook/dinov2-large` - 304M parameters
+- `facebook/dinov2-giant` - 1.1B parameters
 
-# If you're using a checkpoint from a standard model with a lightweight model, 
-# you may want to skip loading the checkpoint to avoid compatibility issues
+When using checkpoints with different configurations:
+```bash
+# Skip loading incompatible checkpoints
 python3 -m dino_detector.train \
   --train_images path/to/coco/train2017 \
   --train_annotations path/to/coco/annotations/instances_train2017.json \
@@ -289,15 +318,11 @@ python3 -m dino_detector.train \
 
 The lightweight configuration:
 - Uses a smaller DINOv2 variant (small by default)
-- Reduces the number of decoder layers (2 instead of 6)
-- Reduces the number of object queries (25 instead of 100)
-- Uses smaller hidden dimensions
-- Applies LoRA only to the last few transformer layers
-- Uses smaller MLP for bounding box prediction
-- Reduces the number of sampling points in deformable attention
-- Supports all official DINOv2 model variants: small, base, large, and giant
-
-This configuration reduces the number of trainable parameters by 80-90% with a modest trade-off in accuracy.
+- Reduces decoder layers from 6 to 3
+- Reduces object queries from 100 to 50
+- Uses smaller hidden dimensions (384 vs 768)
+- Uses smaller MLPs for prediction heads
+- Reduces parameter count by 80-90% with modest accuracy trade-off
 
 ## Model Architecture
 
@@ -359,7 +384,7 @@ The model is evaluated using standard COCO evaluation metrics:
 - **APm**: Average Precision for medium objects
 - **APl**: Average Precision for large objects
 
-## Analyzing Results
+## Result Analysis
 
 The repository includes a dedicated tool for analyzing detection results, generating visualizations, and creating performance reports:
 
@@ -367,14 +392,14 @@ The repository includes a dedicated tool for analyzing detection results, genera
 # Analyze validation metrics
 python3 analyze_results.py --metrics_file outputs/val_metrics_epoch_10.json
 
-# Visualize predictions on test images
+# Visualize predictions with bounding boxes
 python3 analyze_results.py \
   --predictions_file outputs/testdev_predictions_final.json \
   --test_images coco_data/test2017 \
   --num_visualizations 10 \
   --confidence_threshold 0.6
 
-# Run evaluation and generate analysis in one step
+# Combine evaluation and analysis in one step
 python3 analyze_results.py \
   --run_eval \
   --model_path outputs/dino_detector_final.pth \
@@ -383,12 +408,12 @@ python3 analyze_results.py \
   --output_dir analysis_outputs
 ```
 
-The analyze_results.py script generates:
-- Detailed metrics tables and charts
-- Confidence score distributions
-- Class distribution analysis
-- Sample visualizations with bounding boxes
-- Summary reports for model performance
+The analyze_results.py script automatically generates:
+- Metrics tables and performance charts 
+- Confidence score distribution histograms
+- Per-class detection frequency analysis
+- Annotated sample visualizations with bounding boxes
+- All outputs are saved to the specified output directory
 
 ## Citation
 
